@@ -15,14 +15,14 @@ int16_t gx, gy, gz;
 
 // Converted values
 float accX, accY;
-float gyroX, gyroY;
+float gyroX, gyroY, gyroZ;
 
 // Angles
 float accAngleX, accAngleY;
-float angleX = 0, angleY = 0;
+float angleX = 0, angleY = 0, angleZ = 0;
 
 // Calibration offsets
-float gyroX_offset = 0, gyroY_offset = 0;
+float gyroX_offset = 0, gyroY_offset = 0, gyroZ_offset = 0;
 float accAngleX_offset = 0, accAngleY_offset = 0;
 
 // Complementary filter constant
@@ -65,12 +65,13 @@ void setup() {
     float rawGyroY = gy / 131.0;
     float rawGyroZ = gz / 131.0;
 
-    float calAccX = -rawAccZ;
-    float calAccY = rawAccY;
+    float calAccX = rawAccY;
+    float calAccY = -rawAccZ;
     float calAccZ = rawAccX;
 
-    gyroX_offset += (-rawGyroZ);
-    gyroY_offset += rawGyroY;
+    gyroX_offset += rawGyroY;
+    gyroY_offset += (-rawGyroZ);
+    gyroZ_offset += rawGyroX;
 
     accAngleX_offset += atan2(calAccY, calAccZ) * (180.0 / PI);
     accAngleY_offset += atan2(-calAccX, sqrt(calAccY * calAccY + calAccZ * calAccZ)) * (180.0 / PI);
@@ -78,6 +79,7 @@ void setup() {
   }
   gyroX_offset /= num_readings;
   gyroY_offset /= num_readings;
+  gyroZ_offset /= num_readings;
   accAngleX_offset /= num_readings;
   accAngleY_offset /= num_readings;
 
@@ -105,14 +107,14 @@ void loop() {
   float rawGyroZ = gz / 131.0;
 
   // Swap axes based on mount orientation to keep Z pointing UP
-  // Since accAngleY was -90, gravity is along the X axis.
-  accX = -rawAccZ;
-  accY = rawAccY;
+  // Swapped X and Y because pitch was acting on the right side
+  accX = rawAccY;
+  accY = -rawAccZ;
   float accZ = rawAccX;
 
-  gyroX = (-rawGyroZ) - gyroX_offset;
-  gyroY = rawGyroY - gyroY_offset;
-  // float gyroZ = rawGyroX - gyroZ_offset;
+  gyroX = rawGyroY - gyroX_offset;
+  gyroY = (-rawGyroZ) - gyroY_offset;
+  gyroZ = rawGyroX - gyroZ_offset;
 
   // Simple Low-Pass Filter on Accelerometer to reduce noise
   static float filteredAccX = 0, filteredAccY = 0, filteredAccZ = 1;
@@ -128,18 +130,20 @@ void loop() {
   // Complementary filter
   angleX = alpha * (angleX + gyroX * dt) + (1 - alpha) * accAngleX;
   angleY = alpha * (angleY + gyroY * dt) + (1 - alpha) * accAngleY;
+  
+  // Yaw integration
+  angleZ += gyroZ * dt;
+  if(angleZ > 180) angleZ -= 360;
+  if(angleZ < -180) angleZ += 360;
 
   // Read BMP280
   altitude = bmp.readAltitude(1013.25); // standard pressure
 
-  // Serial Plotter output (CSV)
+  // Output specifically for 3D Python Viewer
+  Serial.print("DATA:");
   Serial.print(angleX); Serial.print(",");
   Serial.print(angleY); Serial.print(",");
-  Serial.print(accAngleX); Serial.print(",");
-  Serial.print(accAngleY); Serial.print(",");
-  Serial.print(gyroX); Serial.print(",");
-  Serial.print(gyroY); Serial.print(",");
-  Serial.println(altitude);
+  Serial.println(angleZ);
 
   delay(10); // ~100Hz loop
 }

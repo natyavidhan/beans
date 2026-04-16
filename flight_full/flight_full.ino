@@ -91,6 +91,11 @@ bool  rateMode = false;
 float roll = 0, pitch = 0, yaw = 0;
 float gyroRollRate = 0, gyroPitchRate = 0, gyroYawRate = 0;
 float altitude     = 0;
+
+// Calibration offsets
+float gyroX_offset = 0, gyroY_offset = 0, gyroZ_offset = 0;
+float accAngleX_offset = 0, accAngleY_offset = 0;
+
 float thr, ail, ele, rud, aux1, aux2;
 int   rcRaw[6]     = {0};
 int   motorUS[4]   = {1000, 1000, 1000, 1000};
@@ -574,12 +579,33 @@ void readIMU(float dt) {
   int16_t ax, ay, az, gx, gy, gz;
   mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
-  float accelRoll  = atan2(ay, az) * 180.0 / PI;
-  float accelPitch = atan2(-ax, az) * 180.0 / PI;
+  // Scaled for FS_4 and FS_500
+  float rawAccX = ax / 8192.0;
+  float rawAccY = ay / 8192.0;
+  float rawAccZ = az / 8192.0;
+  float rawGyroX = gx / 65.5;
+  float rawGyroY = gy / 65.5;
+  float rawGyroZ = gz / 65.5;
 
-  gyroRollRate  = gx / 65.5;
-  gyroPitchRate = gy / 65.5;
-  gyroYawRate   = gz / 65.5;
+  // Apply 90-deg sideways mount mappings (Swapped X/Y)
+  float accX = rawAccY;
+  float accY = -rawAccZ;
+  float accZ = rawAccX;
+
+  gyroRollRate  = rawGyroY - gyroX_offset;
+  gyroPitchRate = (-rawGyroZ) - gyroY_offset;
+  gyroYawRate   = rawGyroX - gyroZ_offset;
+
+  // Simple Low-Pass Filter on Accelerometer
+  static float filteredAccX = 0, filteredAccY = 0, filteredAccZ = 1;
+  float lpfAlpha = 0.1;
+  filteredAccX = (lpfAlpha * accX) + ((1.0 - lpfAlpha) * filteredAccX);
+  filteredAccY = (lpfAlpha * accY) + ((1.0 - lpfAlpha) * filteredAccY);
+  filteredAccZ = (lpfAlpha * accZ) + ((1.0 - lpfAlpha) * filteredAccZ);
+
+  // Calculate accelerometer angles from filtered data
+  float accelRoll  = (atan2(filteredAccY, filteredAccZ) * (180.0 / PI)) - accAngleX_offset;
+  float accelPitch = (atan2(-filteredAccX, sqrt(filteredAccY * filteredAccY + filteredAccZ * filteredAccZ)) * (180.0 / PI)) - accAngleY_offset;
 
   roll  = 0.98 * (roll  + gyroRollRate  * dt) + 0.02 * accelRoll;
   pitch = 0.98 * (pitch + gyroPitchRate * dt) + 0.02 * accelPitch;
@@ -677,12 +703,42 @@ void setup() {
   mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_500);
   mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_4);
   mpuOK = true;
-  // if (mpu.testConnection()) {
-  //   mpuOK = true;
-  //   Serial.println("MPU6050 OK");
-  // } else {
-  //   Serial.println("MPU6050 FAILED");
-  // }
+  
+  Serial.println("Letting IMU settle...");
+  delay(1000);
+  Serial.println("Calibrating IMU (Keep Board Flat and still)...");
+  int num_readings = 500;
+  for (int i = 0; i < num_readings; i++) {
+    int16_t ax, ay, az, gx, gy, gz;
+    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    
+    // Scale for FS_4 (8192 LSB/g) and FS_500 (65.5 LSB/dps)
+    float rawAccX = ax / 8192.0;
+    float rawAccY = ay / 8192.0;
+    float rawAccZ = az / 8192.0;
+    float rawGyroX = gx / 65.5;
+    float rawGyroY = gy / 65.5;
+    float rawGyroZ = gz / 65.5;
+
+    // Apply 90-deg sideways mount mappings (Swapped X/Y)
+    float calAccX = rawAccY;
+    float calAccY = -rawAccZ;
+    float calAccZ = rawAccX;
+
+    gyroX_offset += rawGyroY;
+    gyroY_offset += (-rawGyroZ);
+    gyroZ_offset += rawGyroX;
+
+    accAngleX_offset += atan2(calAccY, calAccZ) * (180.0 / PI);
+    accAngleY_offset += atan2(-calAccX, sqrt(calAccY * calAccY + calAccZ * calAccZ)) * (180.0 / PI);
+    delay(3);
+  }
+  gyroX_offset /= num_readings;
+  gyroY_offset /= num_readings;
+  gyroZ_offset /= num_readings;
+  accAngleX_offset /= num_readings;
+  accAngleY_offset /= num_readings;
+  Serial.println("IMU Calibrated!");
 
   if (bmp.begin(0x76)) {
     bmpOK = true;
