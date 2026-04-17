@@ -88,6 +88,8 @@ Servo m1, m2, m3, m4;
 MPU6050 mpu;
 Adafruit_BMP280 bmp;
 WebServer server(80);
+WiFiServer tcpServer(8080);
+WiFiClient tcpClient;
 
 bool  armed    = false;
 bool  mpuOK    = false;
@@ -647,26 +649,27 @@ void updateLED() {
   uint32_t now = millis();
 
   switch (ledPattern) {
-    case LED_BOOT:
+    case LED_BOOT: // Slow blink: 500ms on, 500ms off
       if (now - t > 500) { state = !state; digitalWrite(PIN_LED, state); t = now; }
       break;
-    case LED_READY:
-      if (now - t > 150) {
-        step = (step + 1) % 6;
-        digitalWrite(PIN_LED, step < 2 ? (step % 2 == 0) : LOW);
+    case LED_READY: // Single quick blink: 100ms on, 900ms off
+      if (now - t > 100) {
+        step = (step + 1) % 10; // 10 steps of 100ms = 1s cycle
+        digitalWrite(PIN_LED, (step == 0) ? HIGH : LOW);
         t = now;
       }
       break;
-    case LED_ARMED:
+    case LED_ARMED: // Solid ON
       digitalWrite(PIN_LED, HIGH);
       break;
-    case LED_NOSIGNAL:
+    case LED_NOSIGNAL: // Fast blink: 100ms on, 100ms off
       if (now - t > 100) { state = !state; digitalWrite(PIN_LED, state); t = now; }
       break;
-    case LED_SENSOR_ERR:
-      if (now - t > 120) {
+    case LED_SENSOR_ERR: // Triple quick blink
+      if (now - t > 100) {
         step = (step + 1) % 10;
-        digitalWrite(PIN_LED, step < 6 ? (step % 2 == 0) : LOW);
+        bool ledState = (step == 0 || step == 2 || step == 4);
+        digitalWrite(PIN_LED, ledState ? HIGH : LOW);
         t = now;
       }
       break;
@@ -906,6 +909,7 @@ void setup() {
   server.on("/data", handleData);
   server.on("/update_pid", HTTP_POST, handleUpdatePID);
   server.begin();
+  tcpServer.begin();
 
   // ESC arm delay
   Serial.println("ESCs arming — 3s...");
@@ -922,6 +926,74 @@ void setup() {
 
 void loop() {
   server.handleClient();  // serve web requests
+
+  // ── Raw TCP Socket for High-Speed Python Dashboard ──
+  if (tcpServer.hasClient()) {
+    if (!tcpClient || !tcpClient.connected()) {
+      if (tcpClient) tcpClient.stop();
+      tcpClient = tcpServer.available();
+      tcpClient.setTimeout(2); // very short timeout to not delay loop
+      Serial.println("TCP Dashboard Connected!");
+    } else {
+      tcpServer.available().stop();
+    }
+  }
+
+  if (tcpClient && tcpClient.connected()) {
+    // 1. Process incoming commands (PID updates)
+    while (tcpClient.available()) {
+      String line = tcpClient.readStringUntil('\n');
+      line.trim();
+      if (line.length() > 5) {
+        StaticJsonDocument<512> doc;
+        DeserializationError err = deserializeJson(doc, line);
+        if (!err && doc.containsKey("pid")) {
+          JsonObject p = doc["pid"];
+          if (p.containsKey("sR_p")) stabRoll.kp = p["sR_p"]; if (p.containsKey("sR_i")) stabRoll.ki = p["sR_i"]; if (p.containsKey("sR_d")) stabRoll.kd = p["sR_d"];
+          if (p.containsKey("sP_p")) stabPitch.kp = p["sP_p"]; if (p.containsKey("sP_i")) stabPitch.ki = p["sP_i"]; if (p.containsKey("sP_d")) stabPitch.kd = p["sP_d"];
+          if (p.containsKey("sY_p")) stabYaw.kp = p["sY_p"]; if (p.containsKey("sY_i")) stabYaw.ki = p["sY_i"]; if (p.containsKey("sY_d")) stabYaw.kd = p["sY_d"];
+          
+          if (p.containsKey("rR_p")) rateRoll.kp = p["rR_p"]; if (p.containsKey("rR_i")) rateRoll.ki = p["rR_i"]; if (p.containsKey("rR_d")) rateRoll.kd = p["rR_d"];
+          if (p.containsKey("rP_p")) ratePitch.kp = p["rP_p"]; if (p.containsKey("rP_i")) ratePitch.ki = p["rP_i"]; if (p.containsKey("rP_d")) ratePitch.kd = p["rP_d"];
+          if (p.containsKey("rY_p")) rateYaw.kp = p["rY_p"]; if (p.containsKey("rY_i")) rateYaw.ki = p["rY_i"]; if (p.containsKey("rY_d")) rateYaw.kd = p["rY_d"];
+          Serial.println("Received PIDs via TCP Socket");
+        }
+      }
+    }
+
+    // 2. Transmit high-frequency telemetry (30Hz)
+    static uint32_t lastTcpSend = 0;
+    if (millis() - lastTcpSend >= 33) {
+      lastTcpSend = millis();
+      StaticJsonDocument<1024> doc;
+      doc["type"] = "telemetry";
+      doc["armed"] = armed;
+      doc["rateMode"] = rateMode;
+      doc["signal"] = (millis() - lastRCTime < 1000);
+      doc["roll"] = roll; doc["pitch"] = pitch; doc["yaw"] = yaw;
+      doc["altitude"] = altitude;
+      
+      JsonArray rc = doc.createNestedArray("rcRaw");
+      for(int i=0; i<6; i++) rc.add(rcRaw[i]);
+
+      JsonArray motors = doc.createNestedArray("motorUS");
+      for(int i=0; i<4; i++) motors.add(motorUS[i]);
+
+      JsonObject pid = doc.createNestedObject("pid");
+      pid["sR_p"]=stabRoll.kp; pid["sR_i"]=stabRoll.ki; pid["sR_d"]=stabRoll.kd;
+      pid["sP_p"]=stabPitch.kp; pid["sP_i"]=stabPitch.ki; pid["sP_d"]=stabPitch.kd;
+      pid["sY_p"]=stabYaw.kp; pid["sY_i"]=stabYaw.ki; pid["sY_d"]=stabYaw.kd;
+
+      pid["rR_p"]=rateRoll.kp; pid["rR_i"]=rateRoll.ki; pid["rR_d"]=rateRoll.kd;
+      pid["rP_p"]=ratePitch.kp; pid["rP_i"]=ratePitch.ki; pid["rP_d"]=ratePitch.kd;
+      pid["rY_p"]=rateYaw.kp; pid["rY_i"]=rateYaw.ki; pid["rY_d"]=rateYaw.kd;
+
+      String out;
+      serializeJson(doc, out);
+      tcpClient.println(out);
+    }
+  }
+
 
   uint32_t now = micros();
   float dt = (now - lastLoopTime) / 1000000.0;
