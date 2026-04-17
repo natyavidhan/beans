@@ -69,8 +69,8 @@ void setup() {
     float calAccY = -rawAccZ;
     float calAccZ = rawAccX;
 
-    gyroX_offset += rawGyroY;
-    gyroY_offset += (-rawGyroZ);
+    gyroX_offset += (-rawGyroY);
+    gyroY_offset += (rawGyroZ);
     gyroZ_offset += rawGyroX;
 
     accAngleX_offset += atan2(calAccY, calAccZ) * (180.0 / PI);
@@ -112,8 +112,8 @@ void loop() {
   accY = -rawAccZ;
   float accZ = rawAccX;
 
-  gyroX = rawGyroY - gyroX_offset;
-  gyroY = (-rawGyroZ) - gyroY_offset;
+  gyroX = (-rawGyroY) - gyroX_offset;
+  gyroY = (rawGyroZ) - gyroY_offset;
   gyroZ = rawGyroX - gyroZ_offset;
 
   // Simple Low-Pass Filter on Accelerometer to reduce noise

@@ -55,24 +55,30 @@ struct PID {
   float integral  = 0;
   float prevError = 0;
 
-  float compute(float error, float dt) {
+  // Added currentRate parameter so D-term can use Gyro (Derivative of measurement) 
+  // instead of Derivative of error, eliminating "derivative kick" on stick movements!
+  float compute(float error, float dt, float currentRate) {
     integral += error * dt;
     integral  = constrain(integral, -200, 200);
-    float d   = (error - prevError) / dt;
+    
+    // Standard Drone PID practice: D term uses negative Gyro rate to damp oscillations
+    float d = -currentRate; 
+    
     prevError = error;
-    return kp * error + ki * integral + kd * d;
+    return (kp * error) + (ki * integral) + (kd * d);
   }
   void reset() { integral = 0; prevError = 0; }
 };
 
-// Stabilize (angle)
-PID stabRoll  = {5.0,  0.0,  0.0};
-PID stabPitch = {5.0,  0.0,  0.0};
+// Stabilize (Angle) PID tuned based on video's logic (P for response, D for damping)
+PID stabRoll  = {1.5,  0.0,  0.4};
+PID stabPitch = {1.5,  0.0,  0.4};
+PID stabYaw   = {2.0,  0.0,  0.0}; // Yaw is usually tuned differently
 
-// Rate (gyro)
-PID rateRoll  = {80.0, 60.0, 0.02};
-PID ratePitch = {80.0, 60.0, 0.02};
-PID rateYaw   = {80.0, 10.0, 0.0};
+// Rate (Acro) PID
+PID rateRoll  = {1.0, 0.0, 0.02};
+PID ratePitch = {1.0, 0.0, 0.02};
+PID rateYaw   = {2.0, 0.0, 0.0};
 
 // ═══════════════════════════════════════════════════
 //  GLOBALS
@@ -270,6 +276,39 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     }
 
     #uptime { color: #4a90a4; }
+
+    /* PID */
+    .pid-grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr 1fr 1fr;
+      gap: 6px;
+      align-items: center;
+      font-size: 0.8em;
+    }
+    .pid-grid input {
+      background: #0a0f1a;
+      border: 1px solid #1f2d40;
+      color: #00ffdc;
+      padding: 4px;
+      border-radius: 4px;
+      width: 100%;
+      text-align: center;
+    }
+    .btn {
+      background: #00ffdc;
+      color: #0a0f1a;
+      border: none;
+      padding: 8px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: bold;
+      width: 100%;
+      margin-top: 14px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+    .btn:active { background: #00cca4; }
+
   </style>
 </head>
 <body>
@@ -369,6 +408,38 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     </div>
   </div>
 
+  <!-- PID CARD -->
+  <div class="card" style="grid-column: 1 / -1;">
+    <h2>Live PID Tuning</h2>
+    <div style="display:flex; flex-wrap:wrap; gap:20px;">
+      <div style="flex: 1 1 280px;">
+        <h3 style="font-size:0.8em; margin-bottom:8px; color:#6b7a8d;">STABILIZE MODE</h3>
+        <div class="pid-grid">
+          <div style="color:#6b7a8d;">Axis</div><div>P</div><div>I</div><div>D</div>
+          <div>ROLL</div>
+          <input type="number" id="sR_p" step="0.1"><input type="number" id="sR_i" step="0.01"><input type="number" id="sR_d" step="0.01">
+          <div>PITCH</div>
+          <input type="number" id="sP_p" step="0.1"><input type="number" id="sP_i" step="0.01"><input type="number" id="sP_d" step="0.01">
+          <div>YAW</div>
+          <input type="number" id="sY_p" step="0.1"><input type="number" id="sY_i" step="0.01"><input type="number" id="sY_d" step="0.01">
+        </div>
+      </div>
+      <div style="flex: 1 1 280px;">
+        <h3 style="font-size:0.8em; margin-bottom:8px; color:#6b7a8d;">RATE MODE</h3>
+        <div class="pid-grid">
+          <div style="color:#6b7a8d;">Axis</div><div>P</div><div>I</div><div>D</div>
+          <div>ROLL</div>
+          <input type="number" id="rR_p" step="0.1"><input type="number" id="rR_i" step="0.01"><input type="number" id="rR_d" step="0.01">
+          <div>PITCH</div>
+          <input type="number" id="rP_p" step="0.1"><input type="number" id="rP_i" step="0.01"><input type="number" id="rP_d" step="0.01">
+          <div>YAW</div>
+          <input type="number" id="rY_p" step="0.1"><input type="number" id="rY_i" step="0.01"><input type="number" id="rY_d" step="0.01">
+        </div>
+      </div>
+    </div>
+    <button class="btn" onclick="updatePID()">Push Values to Drone</button>
+  </div>
+
 </div>
 
 <div class="footer">FS-CT6B ✦ ESP32 ✦ REFRESHING @ 10Hz</div>
@@ -436,10 +507,41 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
     return Math.min(100, Math.max(0, (us - min) / (max - min) * 100));
   }
 
+  let pidLoaded = false;
+  const pidKeys = [
+    'sR_p','sR_i','sR_d','sP_p','sP_i','sP_d','sY_p','sY_i','sY_d',
+    'rR_p','rR_i','rR_d','rP_p','rP_i','rP_d','rY_p','rY_i','rY_d'
+  ];
+
+  function updatePID() {
+    const payload = {};
+    pidKeys.forEach(k => {
+      payload[k] = parseFloat(document.getElementById(k).value) || 0.0;
+    });
+    fetch('/update_pid', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(r => r.json()).then(res => {
+      if(res.status === 'ok') {
+        const b = document.querySelector('.btn');
+        b.textContent = "SAVED!";
+        setTimeout(() => b.textContent = "Push Values to Drone", 2000);
+      }
+    });
+  }
+
   function update() {
     fetch('/data')
       .then(r => r.json())
       .then(d => {
+
+        if (!pidLoaded && d.pid) {
+          pidKeys.forEach(k => {
+             document.getElementById(k).value = d.pid[k];
+          });
+          pidLoaded = true;
+        }
 
         // Pills
         const armPill = document.getElementById('pill-arm');
@@ -592,8 +694,8 @@ void readIMU(float dt) {
   float accY = -rawAccZ;
   float accZ = rawAccX;
 
-  gyroRollRate  = rawGyroY - gyroX_offset;
-  gyroPitchRate = (-rawGyroZ) - gyroY_offset;
+  gyroRollRate  = (-rawGyroY) - gyroX_offset;
+  gyroPitchRate = (rawGyroZ) - gyroY_offset;
   gyroYawRate   = rawGyroX - gyroZ_offset;
 
   // Simple Low-Pass Filter on Accelerometer
@@ -643,7 +745,7 @@ void handleData() {
 
   bool signal = (millis() - lastRCTime < 1000);
 
-  StaticJsonDocument<512> doc;
+  StaticJsonDocument<1024> doc;
   doc["armed"]    = armed;
   doc["rateMode"] = rateMode;
   doc["signal"]   = signal;
@@ -663,9 +765,40 @@ void handleData() {
   JsonArray motors = doc.createNestedArray("motorUS");
   for (int i = 0; i < 4; i++) motors.add(motorUS[i]);
 
+  JsonObject pid = doc.createNestedObject("pid");
+  pid["sR_p"] = stabRoll.kp; pid["sR_i"] = stabRoll.ki; pid["sR_d"] = stabRoll.kd;
+  pid["sP_p"] = stabPitch.kp; pid["sP_i"] = stabPitch.ki; pid["sP_d"] = stabPitch.kd;
+  pid["sY_p"] = stabYaw.kp; pid["sY_i"] = stabYaw.ki; pid["sY_d"] = stabYaw.kd;
+  
+  pid["rR_p"] = rateRoll.kp; pid["rR_i"] = rateRoll.ki; pid["rR_d"] = rateRoll.kd;
+  pid["rP_p"] = ratePitch.kp; pid["rP_i"] = ratePitch.ki; pid["rP_d"] = ratePitch.kd;
+  pid["rY_p"] = rateYaw.kp; pid["rY_i"] = rateYaw.ki; pid["rY_d"] = rateYaw.kd;
+
   String json;
   serializeJson(doc, json);
   server.send(200, "application/json", json);
+}
+
+void handleUpdatePID() {
+  if (server.hasArg("plain")) {
+    String body = server.arg("plain");
+    StaticJsonDocument<1024> doc;
+    DeserializationError error = deserializeJson(doc, body);
+    if (!error) {
+      stabRoll.kp = doc["sR_p"]; stabRoll.ki = doc["sR_i"]; stabRoll.kd = doc["sR_d"];
+      stabPitch.kp = doc["sP_p"]; stabPitch.ki = doc["sP_i"]; stabPitch.kd = doc["sP_d"];
+      stabYaw.kp = doc["sY_p"]; stabYaw.ki = doc["sY_i"]; stabYaw.kd = doc["sY_d"];
+      
+      rateRoll.kp = doc["rR_p"]; rateRoll.ki = doc["rR_i"]; rateRoll.kd = doc["rR_d"];
+      ratePitch.kp = doc["rP_p"]; ratePitch.ki = doc["rP_i"]; ratePitch.kd = doc["rP_d"];
+      rateYaw.kp = doc["rY_p"]; rateYaw.ki = doc["rY_i"]; rateYaw.kd = doc["rY_d"];
+      
+      Serial.println("PIDs Updated remotely!");
+      server.send(200, "application/json", "{\"status\":\"ok\"}");
+      return;
+    }
+  }
+  server.send(400, "application/json", "{\"status\":\"error\"}");
 }
 
 // ═══════════════════════════════════════════════════
@@ -725,8 +858,8 @@ void setup() {
     float calAccY = -rawAccZ;
     float calAccZ = rawAccX;
 
-    gyroX_offset += rawGyroY;
-    gyroY_offset += (-rawGyroZ);
+    gyroX_offset += (-rawGyroY);
+    gyroY_offset += (rawGyroZ);
     gyroZ_offset += rawGyroX;
 
     accAngleX_offset += atan2(calAccY, calAccZ) * (180.0 / PI);
@@ -771,6 +904,7 @@ void setup() {
   // Web routes
   server.on("/",     handleRoot);
   server.on("/data", handleData);
+  server.on("/update_pid", HTTP_POST, handleUpdatePID);
   server.begin();
 
   // ESC arm delay
@@ -867,18 +1001,24 @@ void loop() {
   float yawSP   =  rud *  90.0;
 
   if (!rateMode) {
-    // STABILIZE
-    rollOut  = stabRoll.compute(rollSP  - roll,  dt);
-    pitchOut = stabPitch.compute(pitchSP - pitch, dt);
-    yawOut   = rud * 0.15;
+    // STABILIZE MODE: Uses angle error, damped by Gyro (D-term)
+    rollOut  = stabRoll.compute(rollSP - roll, dt, gyroRollRate);
+    pitchOut = stabPitch.compute(pitchSP - pitch, dt, gyroPitchRate);
+    yawOut   = stabYaw.compute(yawSP - yaw, dt, gyroYawRate);
   } else {
-    // RATE
-    rollOut  = rateRoll.compute(rollSP  - gyroRollRate,  dt);
-    pitchOut = ratePitch.compute(pitchSP - gyroPitchRate, dt);
-    yawOut   = rateYaw.compute(yawSP    - gyroYawRate,   dt);
+    // RATE MODE: Uses pure gyro rate error, damped by acceleration of gyro!
+    // Since calculating acceleration of gyro is noisy, it's typically computed
+    // from error-change directly or left simple.
+    float rollErr = rollSP - gyroRollRate;
+    float pitchErr = pitchSP - gyroPitchRate;
+    float yawErr = yawSP - gyroYawRate;
+    
+    rollOut  = rateRoll.compute(rollErr, dt, (rollErr - rateRoll.prevError)/dt);
+    pitchOut = ratePitch.compute(pitchErr, dt, (pitchErr - ratePitch.prevError)/dt);
+    yawOut   = rateYaw.compute(yawErr, dt, (yawErr - rateYaw.prevError)/dt);
   }
 
-  float pidScale = 0.001;
+  float pidScale = 0.01; // Allows use of standard PID numbers (like P=5.0 instead of 0.05)
   rollOut  = constrain(rollOut  * pidScale, -0.3, 0.3);
   pitchOut = constrain(pitchOut * pidScale, -0.3, 0.3);
   yawOut   = constrain(yawOut   * pidScale, -0.3, 0.3);
