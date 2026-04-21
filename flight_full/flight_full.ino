@@ -876,6 +876,19 @@ void setup() {
   accAngleY_offset /= num_readings;
   Serial.println("IMU Calibrated!");
 
+  // Initialize roll/pitch from accelerometer to avoid complementary filter cold-start
+  {
+    int16_t ax, ay, az, gx, gy, gz;
+    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    float initAccX = (ay / 8192.0);
+    float initAccY = -(az / 8192.0);
+    float initAccZ = (ax / 8192.0);
+    roll  = (atan2(initAccY, initAccZ) * (180.0 / PI)) - accAngleX_offset;
+    pitch = (atan2(-initAccX, sqrt(initAccY * initAccY + initAccZ * initAccZ)) * (180.0 / PI)) - accAngleY_offset;
+    yaw   = 0;
+    Serial.printf("Initial angles: Roll=%.1f  Pitch=%.1f\n", roll, pitch);
+  }
+
   if (bmp.begin(0x76)) {
     bmpOK = true;
     bmp.setSampling(Adafruit_BMP280::MODE_NORMAL,
@@ -1066,6 +1079,13 @@ void loop() {
   updateLED();
 
   // ── PID + Motor Mixing ────────────────────────────
+
+  // Reset integral at very low throttle to prevent windup while on the ground
+  if (thr < 0.1) {
+    stabRoll.integral = 0;  stabPitch.integral = 0;  stabYaw.integral = 0;
+    rateRoll.integral = 0;  ratePitch.integral = 0;  rateYaw.integral = 0;
+  }
+
   float rollOut = 0, pitchOut = 0, yawOut = 0;
 
   float rollSP  =  ail *  30.0;
@@ -1078,16 +1098,16 @@ void loop() {
     pitchOut = stabPitch.compute(pitchSP - pitch, dt, gyroPitchRate);
     yawOut   = stabYaw.compute(yawSP - yaw, dt, gyroYawRate);
   } else {
-    // RATE MODE: Uses pure gyro rate error, damped by acceleration of gyro!
-    // Since calculating acceleration of gyro is noisy, it's typically computed
-    // from error-change directly or left simple.
-    float rollErr = rollSP - gyroRollRate;
+    // RATE MODE: Uses pure gyro rate error, damped by gyro rate directly
+    float rollErr  = rollSP  - gyroRollRate;
     float pitchErr = pitchSP - gyroPitchRate;
-    float yawErr = yawSP - gyroYawRate;
-    
-    rollOut  = rateRoll.compute(rollErr, dt, (rollErr - rateRoll.prevError)/dt);
-    pitchOut = ratePitch.compute(pitchErr, dt, (pitchErr - ratePitch.prevError)/dt);
-    yawOut   = rateYaw.compute(yawErr, dt, (yawErr - rateYaw.prevError)/dt);
+    float yawErr   = yawSP   - gyroYawRate;
+
+    // D-term uses the actual gyro rate (measurement) for clean damping,
+    // NOT error-derivative which amplifies noise and causes derivative kick
+    rollOut  = rateRoll.compute(rollErr, dt, gyroRollRate);
+    pitchOut = ratePitch.compute(pitchErr, dt, gyroPitchRate);
+    yawOut   = rateYaw.compute(yawErr, dt, gyroYawRate);
   }
 
   float pidScale = 0.01; // Allows use of standard PID numbers (like P=5.0 instead of 0.05)
@@ -1095,16 +1115,19 @@ void loop() {
   pitchOut = constrain(pitchOut * pidScale, -0.3, 0.3);
   yawOut   = constrain(yawOut   * pidScale, -0.3, 0.3);
 
-  if (armed && thr > 0.02) {
-    writeMotors(
-      thr - rollOut + pitchOut - yawOut,  // FL
-      thr + rollOut + pitchOut + yawOut,  // FR
-      thr - rollOut - pitchOut + yawOut,  // RL
-      thr + rollOut - pitchOut - yawOut   // RR
-    );
-  } else {
-    motorsOff();
-  }
+  // Motor mixing — standard X-configuration
+  //   +rollOut  → roll right → increase FL/RL (left side), decrease FR/RR (right side)
+  //   +pitchOut → pitch back  → increase FL/FR (front),    decrease RL/RR (rear)
+  //   +yawOut   → yaw right   → increase FR/RL (CW props), decrease FL/RR (CCW props)
+  float idleSpeed = 0.05;  // 5% minimum spin keeps all motors alive when armed
+  float base = (thr > idleSpeed) ? thr : idleSpeed;
+
+  writeMotors(
+    base + rollOut + pitchOut - yawOut,  // FL (M1, CCW)
+    base - rollOut + pitchOut + yawOut,  // FR (M2, CW)
+    base + rollOut - pitchOut + yawOut,  // RL (M3, CW)
+    base - rollOut - pitchOut - yawOut   // RR (M4, CCW)
+  );
 
   // ── Serial debug ──────────────────────────────────
   static uint32_t lastPrint = 0;
