@@ -19,9 +19,14 @@
 
 Servo esc1, esc2, esc3, esc4;
 
-// Read a PWM signal from receiver (returns microseconds, 1000-2000)
-int readPWM(int pin) {
-  return pulseIn(pin, HIGH, 25000);  // 25ms timeout
+volatile uint32_t rcRiseTimeThr = 0;
+volatile int      rcRawThr      = 1000;
+
+void IRAM_ATTR isr_ch3() { 
+  if(digitalRead(PIN_CH3_THROTTLE)) 
+    rcRiseTimeThr = micros(); 
+  else 
+    rcRawThr = micros() - rcRiseTimeThr; 
 }
 
 // Map receiver us value to ESC us value with safety cap
@@ -43,7 +48,7 @@ void armESC() {
 void setup() {
   Serial.begin(115200);
 
-  pinMode(PIN_CH3_THROTTLE, INPUT);
+  attachInterrupt(PIN_CH3_THROTTLE, isr_ch3, CHANGE);
   // pinMode(PIN_CH1_AILERON,  INPUT);
   // pinMode(PIN_CH2_ELEVATOR, INPUT);
   // pinMode(PIN_CH4_RUDDER,   INPUT);
@@ -68,7 +73,7 @@ void setup() {
   // ── Safety check: throttle must be low before arming ────────
   Serial.println("Checking throttle position...");
   while (true) {
-    int thr = readPWM(PIN_CH3_THROTTLE);
+    int thr = rcRawThr;
     Serial.printf("Throttle: %d us\n", thr);
     if (thr > 0 && thr < ARM_THRESHOLD_US) {
       Serial.println("Throttle low — OK to arm.");
@@ -83,13 +88,14 @@ void setup() {
 
 void loop() {
   // Read all channels
-  int thr = readPWM(PIN_CH3_THROTTLE);
+  int thr = rcRawThr;
   // int ail = readPWM(PIN_CH1_AILERON);
   // int ele = readPWM(PIN_CH2_ELEVATOR);
   // int rud = readPWM(PIN_CH4_RUDDER);
 
   // Safety: if signal lost (pulseIn returns 0), cut throttle
-  if (thr == 0) {
+  bool signalLost = (rcRawThr < 800 || rcRawThr > 2200);
+  if (signalLost) {
     Serial.println("⚠ SIGNAL LOST — cutting throttle!");
     esc1.writeMicroseconds(ESC_MIN_US);
     esc2.writeMicroseconds(ESC_MIN_US);

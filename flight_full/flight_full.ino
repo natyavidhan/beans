@@ -105,8 +105,16 @@ float gyroX_offset = 0, gyroY_offset = 0, gyroZ_offset = 0;
 float accAngleX_offset = 0, accAngleY_offset = 0;
 
 float thr, ail, ele, rud, aux1, aux2;
-int   rcRaw[6]     = {0};
+volatile uint32_t rcRiseTime[6] = {0};
+volatile int      rcRaw[6]      = {1000, 1500, 1000, 1500, 1000, 1500};
 int   motorUS[4]   = {1000, 1000, 1000, 1000};
+
+void IRAM_ATTR isr_ch1() { if(digitalRead(PIN_CH1_AIL)) rcRiseTime[0]=micros(); else rcRaw[0]=micros()-rcRiseTime[0]; }
+void IRAM_ATTR isr_ch2() { if(digitalRead(PIN_CH2_ELE)) rcRiseTime[1]=micros(); else rcRaw[1]=micros()-rcRiseTime[1]; }
+void IRAM_ATTR isr_ch3() { if(digitalRead(PIN_CH3_THR)) rcRiseTime[2]=micros(); else rcRaw[2]=micros()-rcRiseTime[2]; }
+void IRAM_ATTR isr_ch4() { if(digitalRead(PIN_CH4_RUD)) rcRiseTime[3]=micros(); else rcRaw[3]=micros()-rcRiseTime[3]; }
+void IRAM_ATTR isr_ch5() { if(digitalRead(PIN_CH5_AUX1)) rcRiseTime[4]=micros(); else rcRaw[4]=micros()-rcRiseTime[4]; }
+void IRAM_ATTR isr_ch6() { if(digitalRead(PIN_CH6_AUX2)) rcRiseTime[5]=micros(); else rcRaw[5]=micros()-rcRiseTime[5]; }
 
 uint32_t lastLoopTime = 0;
 uint32_t lastRCTime   = 0;
@@ -603,10 +611,6 @@ const char INDEX_HTML[] PROGMEM = R"rawliteral(
 //  HELPERS
 // ═══════════════════════════════════════════════════
 
-int readPWM(int pin) {
-  return pulseIn(pin, HIGH, 25000);
-}
-
 float normalizeStick(int us, RCChannel &r) {
   us = constrain(us, r.min, r.max);
   return (us <= r.mid)
@@ -684,13 +688,13 @@ void readIMU(float dt) {
   int16_t ax, ay, az, gx, gy, gz;
   mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
 
-  // Scaled for FS_4 and FS_500
+  // Scaled for FS_4 and FS_250
   float rawAccX = ax / 8192.0;
   float rawAccY = ay / 8192.0;
   float rawAccZ = az / 8192.0;
-  float rawGyroX = gx / 65.5;
-  float rawGyroY = gy / 65.5;
-  float rawGyroZ = gz / 65.5;
+  float rawGyroX = gx / 131.0;
+  float rawGyroY = gy / 131.0;
+  float rawGyroZ = gz / 131.0;
 
   // Apply 90-deg sideways mount mappings (Swapped X/Y)
   float accX = rawAccY;
@@ -814,12 +818,12 @@ void setup() {
   ledPattern = LED_BOOT;
 
   // RC pins
-  pinMode(PIN_CH1_AIL,  INPUT);
-  pinMode(PIN_CH2_ELE,  INPUT);
-  pinMode(PIN_CH3_THR,  INPUT);
-  pinMode(PIN_CH4_RUD,  INPUT);
-  pinMode(PIN_CH5_AUX1, INPUT);
-  pinMode(PIN_CH6_AUX2, INPUT);
+  attachInterrupt(PIN_CH1_AIL,  isr_ch1, CHANGE);
+  attachInterrupt(PIN_CH2_ELE,  isr_ch2, CHANGE);
+  attachInterrupt(PIN_CH3_THR,  isr_ch3, CHANGE);
+  attachInterrupt(PIN_CH4_RUD,  isr_ch4, CHANGE);
+  attachInterrupt(PIN_CH5_AUX1, isr_ch5, CHANGE);
+  attachInterrupt(PIN_CH6_AUX2, isr_ch6, CHANGE);
 
   // ESCs
   ESP32PWM::allocateTimer(0);
@@ -836,7 +840,7 @@ void setup() {
   Wire.begin(I2C_SDA, I2C_SCL);
 
   mpu.initialize();
-  mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_500);
+  mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_250);
   mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_4);
   mpuOK = true;
   
@@ -848,13 +852,13 @@ void setup() {
     int16_t ax, ay, az, gx, gy, gz;
     mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
     
-    // Scale for FS_4 (8192 LSB/g) and FS_500 (65.5 LSB/dps)
+    // Scale for FS_4 (8192 LSB/g) and FS_250 (131.0 LSB/dps)
     float rawAccX = ax / 8192.0;
     float rawAccY = ay / 8192.0;
     float rawAccZ = az / 8192.0;
-    float rawGyroX = gx / 65.5;
-    float rawGyroY = gy / 65.5;
-    float rawGyroZ = gz / 65.5;
+    float rawGyroX = gx / 131.0;
+    float rawGyroY = gy / 131.0;
+    float rawGyroZ = gz / 131.0;
 
     // Apply 90-deg sideways mount mappings (Swapped X/Y)
     float calAccX = rawAccY;
@@ -924,6 +928,80 @@ void setup() {
   server.begin();
   tcpServer.begin();
 
+  xTaskCreatePinnedToCore([](void*){
+    for(;;) {
+      server.handleClient();
+      
+      // ── Raw TCP Socket for High-Speed Python Dashboard ──
+      if (tcpServer.hasClient()) {
+        if (!tcpClient || !tcpClient.connected()) {
+          if (tcpClient) tcpClient.stop();
+          tcpClient = tcpServer.available();
+          tcpClient.setTimeout(2); // very short timeout to not delay loop
+          Serial.println("TCP Dashboard Connected!");
+        } else {
+          tcpServer.available().stop();
+        }
+      }
+
+      if (tcpClient && tcpClient.connected()) {
+        // 1. Process incoming commands (PID updates)
+        while (tcpClient.available()) {
+          String line = tcpClient.readStringUntil('\n');
+          line.trim();
+          if (line.length() > 5) {
+            StaticJsonDocument<512> doc;
+            DeserializationError err = deserializeJson(doc, line);
+            if (!err && doc.containsKey("pid")) {
+              JsonObject p = doc["pid"];
+              if (p.containsKey("sR_p")) stabRoll.kp = p["sR_p"]; if (p.containsKey("sR_i")) stabRoll.ki = p["sR_i"]; if (p.containsKey("sR_d")) stabRoll.kd = p["sR_d"];
+              if (p.containsKey("sP_p")) stabPitch.kp = p["sP_p"]; if (p.containsKey("sP_i")) stabPitch.ki = p["sP_i"]; if (p.containsKey("sP_d")) stabPitch.kd = p["sP_d"];
+              if (p.containsKey("sY_p")) stabYaw.kp = p["sY_p"]; if (p.containsKey("sY_i")) stabYaw.ki = p["sY_i"]; if (p.containsKey("sY_d")) stabYaw.kd = p["sY_d"];
+              
+              if (p.containsKey("rR_p")) rateRoll.kp = p["rR_p"]; if (p.containsKey("rR_i")) rateRoll.ki = p["rR_i"]; if (p.containsKey("rR_d")) rateRoll.kd = p["rR_d"];
+              if (p.containsKey("rP_p")) ratePitch.kp = p["rP_p"]; if (p.containsKey("rP_i")) ratePitch.ki = p["rP_i"]; if (p.containsKey("rP_d")) ratePitch.kd = p["rP_d"];
+              if (p.containsKey("rY_p")) rateYaw.kp = p["rY_p"]; if (p.containsKey("rY_i")) rateYaw.ki = p["rY_i"]; if (p.containsKey("rY_d")) rateYaw.kd = p["rY_d"];
+              Serial.println("Received PIDs via TCP Socket");
+            }
+          }
+        }
+
+        // 2. Transmit high-frequency telemetry (30Hz)
+        static uint32_t lastTcpSend = 0;
+        if (millis() - lastTcpSend >= 33) {
+          lastTcpSend = millis();
+          StaticJsonDocument<1024> doc;
+          doc["type"] = "telemetry";
+          doc["armed"] = armed;
+          doc["rateMode"] = rateMode;
+          doc["signal"] = (millis() - lastRCTime < 1000);
+          doc["roll"] = roll; doc["pitch"] = pitch; doc["yaw"] = yaw;
+          doc["altitude"] = altitude;
+          
+          JsonArray rc = doc.createNestedArray("rcRaw");
+          for(int i=0; i<6; i++) rc.add(rcRaw[i]);
+
+          JsonArray motors = doc.createNestedArray("motorUS");
+          for(int i=0; i<4; i++) motors.add(motorUS[i]);
+
+          JsonObject pid = doc.createNestedObject("pid");
+          pid["sR_p"]=stabRoll.kp; pid["sR_i"]=stabRoll.ki; pid["sR_d"]=stabRoll.kd;
+          pid["sP_p"]=stabPitch.kp; pid["sP_i"]=stabPitch.ki; pid["sP_d"]=stabPitch.kd;
+          pid["sY_p"]=stabYaw.kp; pid["sY_i"]=stabYaw.ki; pid["sY_d"]=stabYaw.kd;
+
+          pid["rR_p"]=rateRoll.kp; pid["rR_i"]=rateRoll.ki; pid["rR_d"]=rateRoll.kd;
+          pid["rP_p"]=ratePitch.kp; pid["rP_i"]=ratePitch.ki; pid["rP_d"]=ratePitch.kd;
+          pid["rY_p"]=rateYaw.kp; pid["rY_i"]=rateYaw.ki; pid["rY_d"]=rateYaw.kd;
+
+          String out;
+          serializeJson(doc, out);
+          tcpClient.println(out);
+        }
+      }
+      vTaskDelay(1);
+    }
+  }, "wifi", 8192, NULL, 1, NULL, 0);
+
   // ESC arm delay
   Serial.println("ESCs arming — 3s...");
   motorsOff();
@@ -938,90 +1016,16 @@ void setup() {
 // ═══════════════════════════════════════════════════
 
 void loop() {
-  server.handleClient();  // serve web requests
-
-  // ── Raw TCP Socket for High-Speed Python Dashboard ──
-  if (tcpServer.hasClient()) {
-    if (!tcpClient || !tcpClient.connected()) {
-      if (tcpClient) tcpClient.stop();
-      tcpClient = tcpServer.available();
-      tcpClient.setTimeout(2); // very short timeout to not delay loop
-      Serial.println("TCP Dashboard Connected!");
-    } else {
-      tcpServer.available().stop();
-    }
-  }
-
-  if (tcpClient && tcpClient.connected()) {
-    // 1. Process incoming commands (PID updates)
-    while (tcpClient.available()) {
-      String line = tcpClient.readStringUntil('\n');
-      line.trim();
-      if (line.length() > 5) {
-        StaticJsonDocument<512> doc;
-        DeserializationError err = deserializeJson(doc, line);
-        if (!err && doc.containsKey("pid")) {
-          JsonObject p = doc["pid"];
-          if (p.containsKey("sR_p")) stabRoll.kp = p["sR_p"]; if (p.containsKey("sR_i")) stabRoll.ki = p["sR_i"]; if (p.containsKey("sR_d")) stabRoll.kd = p["sR_d"];
-          if (p.containsKey("sP_p")) stabPitch.kp = p["sP_p"]; if (p.containsKey("sP_i")) stabPitch.ki = p["sP_i"]; if (p.containsKey("sP_d")) stabPitch.kd = p["sP_d"];
-          if (p.containsKey("sY_p")) stabYaw.kp = p["sY_p"]; if (p.containsKey("sY_i")) stabYaw.ki = p["sY_i"]; if (p.containsKey("sY_d")) stabYaw.kd = p["sY_d"];
-          
-          if (p.containsKey("rR_p")) rateRoll.kp = p["rR_p"]; if (p.containsKey("rR_i")) rateRoll.ki = p["rR_i"]; if (p.containsKey("rR_d")) rateRoll.kd = p["rR_d"];
-          if (p.containsKey("rP_p")) ratePitch.kp = p["rP_p"]; if (p.containsKey("rP_i")) ratePitch.ki = p["rP_i"]; if (p.containsKey("rP_d")) ratePitch.kd = p["rP_d"];
-          if (p.containsKey("rY_p")) rateYaw.kp = p["rY_p"]; if (p.containsKey("rY_i")) rateYaw.ki = p["rY_i"]; if (p.containsKey("rY_d")) rateYaw.kd = p["rY_d"];
-          Serial.println("Received PIDs via TCP Socket");
-        }
-      }
-    }
-
-    // 2. Transmit high-frequency telemetry (30Hz)
-    static uint32_t lastTcpSend = 0;
-    if (millis() - lastTcpSend >= 33) {
-      lastTcpSend = millis();
-      StaticJsonDocument<1024> doc;
-      doc["type"] = "telemetry";
-      doc["armed"] = armed;
-      doc["rateMode"] = rateMode;
-      doc["signal"] = (millis() - lastRCTime < 1000);
-      doc["roll"] = roll; doc["pitch"] = pitch; doc["yaw"] = yaw;
-      doc["altitude"] = altitude;
-      
-      JsonArray rc = doc.createNestedArray("rcRaw");
-      for(int i=0; i<6; i++) rc.add(rcRaw[i]);
-
-      JsonArray motors = doc.createNestedArray("motorUS");
-      for(int i=0; i<4; i++) motors.add(motorUS[i]);
-
-      JsonObject pid = doc.createNestedObject("pid");
-      pid["sR_p"]=stabRoll.kp; pid["sR_i"]=stabRoll.ki; pid["sR_d"]=stabRoll.kd;
-      pid["sP_p"]=stabPitch.kp; pid["sP_i"]=stabPitch.ki; pid["sP_d"]=stabPitch.kd;
-      pid["sY_p"]=stabYaw.kp; pid["sY_i"]=stabYaw.ki; pid["sY_d"]=stabYaw.kd;
-
-      pid["rR_p"]=rateRoll.kp; pid["rR_i"]=rateRoll.ki; pid["rR_d"]=rateRoll.kd;
-      pid["rP_p"]=ratePitch.kp; pid["rP_i"]=ratePitch.ki; pid["rP_d"]=ratePitch.kd;
-      pid["rY_p"]=rateYaw.kp; pid["rY_i"]=rateYaw.ki; pid["rY_d"]=rateYaw.kd;
-
-      String out;
-      serializeJson(doc, out);
-      tcpClient.println(out);
-    }
-  }
-
-
   uint32_t now = micros();
   float dt = (now - lastLoopTime) / 1000000.0;
   lastLoopTime = now;
   dt = constrain(dt, 0.001, 0.05);
 
   // ── Read RC ───────────────────────────────────────
-  rcRaw[0] = readPWM(PIN_CH1_AIL);
-  rcRaw[1] = readPWM(PIN_CH2_ELE);
-  rcRaw[2] = readPWM(PIN_CH3_THR);
-  rcRaw[3] = readPWM(PIN_CH4_RUD);
-  rcRaw[4] = readPWM(PIN_CH5_AUX1);
-  rcRaw[5] = readPWM(PIN_CH6_AUX2);
+  // rcRaw is updated via interrupts automatically
 
-  if (rcRaw[2] == 0) {
+  bool signalLost = (rcRaw[2] < 800 || rcRaw[2] > 2200);
+  if (signalLost) {
     if (armed) { Serial.println("⚠ SIGNAL LOST"); armed = false; motorsOff(); }
     ledPattern = LED_NOSIGNAL;
     updateLED();
@@ -1096,7 +1100,7 @@ void loop() {
     // STABILIZE MODE: Uses angle error, damped by Gyro (D-term)
     rollOut  = stabRoll.compute(rollSP - roll, dt, gyroRollRate);
     pitchOut = stabPitch.compute(pitchSP - pitch, dt, gyroPitchRate);
-    yawOut   = stabYaw.compute(yawSP - yaw, dt, gyroYawRate);
+    yawOut   = rud * 0.2;  // direct passthrough, no PID
   } else {
     // RATE MODE: Uses pure gyro rate error, damped by gyro rate directly
     float rollErr  = rollSP  - gyroRollRate;
@@ -1123,10 +1127,10 @@ void loop() {
   float base = (thr > idleSpeed) ? thr : idleSpeed;
 
   writeMotors(
-    base + rollOut + pitchOut - yawOut,  // FL (M1, CCW)
-    base - rollOut + pitchOut + yawOut,  // FR (M2, CW)
-    base + rollOut - pitchOut + yawOut,  // RL (M3, CW)
-    base - rollOut - pitchOut - yawOut   // RR (M4, CCW)
+    base + rollOut + pitchOut + yawOut,  // FL (M1, CCW)
+    base - rollOut + pitchOut - yawOut,  // FR (M2, CW)
+    base + rollOut - pitchOut - yawOut,  // RL (M3, CW)
+    base - rollOut - pitchOut + yawOut   // RR (M4, CCW)
   );
 
   // ── Serial debug ──────────────────────────────────
