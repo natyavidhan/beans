@@ -1,321 +1,176 @@
-#include <ESP32Servo.h>
 #include <Wire.h>
-#include <MPU6050.h>
+#include <ESP32Servo.h>
 
-// ═══════════════════════════════════════════════════
-//  PINS — unchanged from your code
-// ═══════════════════════════════════════════════════
-
+// ========= PIN CONFIG =========
 #define PIN_CH1_AIL   34
 #define PIN_CH2_ELE   35
 #define PIN_CH3_THR   32
 #define PIN_CH4_RUD   33
-#define PIN_CH5_AUX1  13   // ← live P gain adjust
-#define PIN_CH6_AUX2  12   // ← live D gain adjust
+#define PIN_CH5_AUX1  13
+#define PIN_CH6_AUX2  12
+
 #define PIN_M1_FL     14
 #define PIN_M2_FR     27
 #define PIN_M3_RL     26
 #define PIN_M4_RR     25
-#define PIN_LED        2
-#define I2C_SDA       21
-#define I2C_SCL       22
 
-// ═══════════════════════════════════════════════════
-//  RC CALIBRATION — unchanged
-// ═══════════════════════════════════════════════════
+#define I2C_SDA 21
+#define I2C_SCL 22
 
-struct RCChannel { int min, mid, max; };
-RCChannel RC[6] = {
-  {1054, 1477, 1900},
-  {1184, 1520, 1856},
-  {1145, 1488, 1831},
-  {1097, 1507, 1917},
-  {1000, 1511, 2023},
-  {1000, 1511, 2023},
-};
+// ========= MPU =========
+#define MPU_ADDR 0x68
 
-// ═══════════════════════════════════════════════════
-//  ROLL PID — only one that matters here
-//  AUX1 knob overrides kp live (0.0 → 10.0)
-//  AUX2 knob overrides kd live (0.0 → 2.0)
-// ═══════════════════════════════════════════════════
+float roll = 0;
+float gyroRate = 0;
 
+// ========= PID =========
 struct PID {
   float kp, ki, kd;
-  float integral  = 0;
-  float prevError = 0;
-  float compute(float error, float dt, float currentRate) {
-    integral += error * dt;
-    integral  = constrain(integral, -200, 200);
-    float d   = -currentRate;
-    prevError = error;
-    return (kp * error) + (ki * integral) + (kd * d);
-  }
-  void reset() { integral = 0; prevError = 0; }
+  float integral;
+  float lastError;
 };
 
-PID rollPID = {1.5, 0.0, 0.4};  // starting point — knobs override kp/kd live
+PID anglePID = {3.0, 0.0, 0.0, 0, 0};
+PID ratePID  = {0.15, 0.0, 0.003, 0, 0};
 
-// ═══════════════════════════════════════════════════
-//  GLOBALS
-// ═══════════════════════════════════════════════════
+// ========= RC INPUT =========
+volatile uint32_t rise[6];
+volatile uint16_t ch[6] = {1500,1500,1000,1500,1500,1500};
 
-Servo m1, m2, m3, m4;
-MPU6050 mpu;
+int pins[6] = {
+  PIN_CH1_AIL, PIN_CH2_ELE, PIN_CH3_THR,
+  PIN_CH4_RUD, PIN_CH5_AUX1, PIN_CH6_AUX2
+};
 
-bool  armed   = false;
-bool  mpuOK   = false;
-float roll    = 0;
-float gyroRollRate = 0;
+void IRAM_ATTR isr0(){ handleISR(0); }
+void IRAM_ATTR isr1(){ handleISR(1); }
+void IRAM_ATTR isr2(){ handleISR(2); }
+void IRAM_ATTR isr3(){ handleISR(3); }
+void IRAM_ATTR isr4(){ handleISR(4); }
+void IRAM_ATTR isr5(){ handleISR(5); }
 
-float gyroX_offset = 0, gyroY_offset = 0, gyroZ_offset = 0;
-float accAngleX_offset = 0, accAngleY_offset = 0;
-
-float thr, ail, rud, aux1, aux2;
-int   motorUS[4] = {1000,1000,1000,1000};
-
-volatile uint32_t rcRiseTime[6] = {0};
-volatile int      rcRaw[6]      = {1000,1500,1000,1500,1000,1500};
-
-uint32_t lastLoopTime = 0;
-
-// ── ISRs — identical to your code ─────────────────
-
-void IRAM_ATTR isr_ch1() {
-  if (digitalRead(PIN_CH1_AIL)) { rcRiseTime[0]=micros(); }
-  else if (rcRiseTime[0]>0) { uint32_t p=micros()-rcRiseTime[0]; if(p>=800&&p<=2200) rcRaw[0]=p; rcRiseTime[0]=0; }
-}
-void IRAM_ATTR isr_ch2() {
-  if (digitalRead(PIN_CH2_ELE)) { rcRiseTime[1]=micros(); }
-  else if (rcRiseTime[1]>0) { uint32_t p=micros()-rcRiseTime[1]; if(p>=800&&p<=2200) rcRaw[1]=p; rcRiseTime[1]=0; }
-}
-void IRAM_ATTR isr_ch3() {
-  if (digitalRead(PIN_CH3_THR)) { rcRiseTime[2]=micros(); }
-  else if (rcRiseTime[2]>0) { uint32_t p=micros()-rcRiseTime[2]; if(p>=800&&p<=2200) rcRaw[2]=p; rcRiseTime[2]=0; }
-}
-void IRAM_ATTR isr_ch4() {
-  if (digitalRead(PIN_CH4_RUD)) { rcRiseTime[3]=micros(); }
-  else if (rcRiseTime[3]>0) { uint32_t p=micros()-rcRiseTime[3]; if(p>=800&&p<=2200) rcRaw[3]=p; rcRiseTime[3]=0; }
-}
-void IRAM_ATTR isr_ch5() {
-  if (digitalRead(PIN_CH5_AUX1)) { rcRiseTime[4]=micros(); }
-  else if (rcRiseTime[4]>0) { uint32_t p=micros()-rcRiseTime[4]; if(p>=800&&p<=2200) rcRaw[4]=p; rcRiseTime[4]=0; }
-}
-void IRAM_ATTR isr_ch6() {
-  if (digitalRead(PIN_CH6_AUX2)) { rcRiseTime[5]=micros(); }
-  else if (rcRiseTime[5]>0) { uint32_t p=micros()-rcRiseTime[5]; if(p>=800&&p<=2200) rcRaw[5]=p; rcRiseTime[5]=0; }
-}
-
-// ═══════════════════════════════════════════════════
-//  HELPERS
-// ═══════════════════════════════════════════════════
-
-float normalizeStick(int us, RCChannel &r) {
-  us = constrain(us, r.min, r.max);
-  return (us<=r.mid) ? (float)(us-r.mid)/(r.mid-r.min) : (float)(us-r.mid)/(r.max-r.mid);
-}
-float normalizeThrottle(int us, RCChannel &r) {
-  us = constrain(us, r.min, r.max);
-  return (float)(us-r.min)/(r.max-r.min);
-}
-
-void writeMotors(float fl, float fr, float rl, float rr) {
-  motorUS[0] = 1000+(int)(constrain(fl,0,1)*1000);
-  motorUS[1] = 1000+(int)(constrain(fr,0,1)*1000);
-  motorUS[2] = 1000+(int)(constrain(rl,0,1)*1000);
-  motorUS[3] = 1000+(int)(constrain(rr,0,1)*1000);
-  m1.writeMicroseconds(motorUS[0]);
-  m2.writeMicroseconds(motorUS[1]);
-  m3.writeMicroseconds(motorUS[2]);
-  m4.writeMicroseconds(motorUS[3]);
-}
-
-void motorsOff() {
-  for(int i=0;i<4;i++) motorUS[i]=1000;
-  m1.writeMicroseconds(1000); m2.writeMicroseconds(1000);
-  m3.writeMicroseconds(1000); m4.writeMicroseconds(1000);
-}
-
-// ═══════════════════════════════════════════════════
-//  IMU — only roll, identical axis mapping to your code
-// ═══════════════════════════════════════════════════
-
-void readIMU(float dt) {
-  int16_t ax, ay, az, gx, gy, gz;
-  mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
-
-  float rawAccX = ax / 8192.0;
-  float rawAccY = ay / 8192.0;
-  float rawAccZ = az / 8192.0;
-
-  // Your axis remapping (90-deg sideways mount)
-  float accX = -rawAccY;
-  float accY =  rawAccZ;
-  float accZ =  rawAccX;
-
-  gyroRollRate = (rawAccY > 0 ? 1 : -1) * (gy / 131.0) - gyroX_offset;
-  // Using your mapping: gyroX = rawGyroY
-  gyroRollRate = (gy / 131.0) - gyroX_offset;
-
-  float accelRoll = (atan2(accY, accZ) * 180.0/PI) - accAngleX_offset;
-
-  // Snap to accel on ground, complementary filter in air
-  if (thr < 0.1) {
-    roll = accelRoll;
+void handleISR(int i){
+  if (digitalRead(pins[i])) {
+    rise[i] = micros();
   } else {
-    roll = 0.98*(roll + gyroRollRate*dt) + 0.02*accelRoll;
+    ch[i] = micros() - rise[i];
   }
 }
 
-// ═══════════════════════════════════════════════════
-//  SETUP
-// ═══════════════════════════════════════════════════
+// ========= ESC =========
+Servo m1, m2, m3, m4;
 
+// ========= TIME =========
+unsigned long lastTime;
+
+// ========= PID =========
+float computePID(PID &pid, float error, float dt) {
+  pid.integral += error * dt;
+  float derivative = (error - pid.lastError) / dt;
+  pid.lastError = error;
+  return pid.kp * error + pid.ki * pid.integral + pid.kd * derivative;
+}
+
+// ========= MPU =========
+void initMPU() {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x6B);
+  Wire.write(0);
+  Wire.endTransmission(true);
+}
+
+void readMPU(float dt) {
+  Wire.beginTransmission(MPU_ADDR);
+  Wire.write(0x3B);
+  Wire.endTransmission(false);
+  Wire.requestFrom(MPU_ADDR, 14, true);
+
+  float accX = (Wire.read()<<8 | Wire.read()) / 16384.0;
+  float accY = (Wire.read()<<8 | Wire.read()) / 16384.0;
+  float accZ = (Wire.read()<<8 | Wire.read()) / 16384.0;
+
+  Wire.read(); Wire.read();
+
+  float gyroX = (Wire.read()<<8 | Wire.read()) / 131.0;
+
+  float accRoll = atan2(accY, accZ) * 180 / PI;
+
+  roll = 0.98 * (roll + gyroX * dt) + 0.02 * accRoll;
+  gyroRate = gyroX;
+}
+
+// ========= SETUP =========
 void setup() {
   Serial.begin(115200);
-  pinMode(PIN_LED, OUTPUT);
-  digitalWrite(PIN_LED, LOW);
-
-  attachInterrupt(PIN_CH1_AIL,  isr_ch1, CHANGE);
-  attachInterrupt(PIN_CH2_ELE,  isr_ch2, CHANGE);
-  attachInterrupt(PIN_CH3_THR,  isr_ch3, CHANGE);
-  attachInterrupt(PIN_CH4_RUD,  isr_ch4, CHANGE);
-  attachInterrupt(PIN_CH5_AUX1, isr_ch5, CHANGE);
-  attachInterrupt(PIN_CH6_AUX2, isr_ch6, CHANGE);
-
-  ESP32PWM::allocateTimer(0); ESP32PWM::allocateTimer(1);
-  ESP32PWM::allocateTimer(2); ESP32PWM::allocateTimer(3);
-  m1.setPeriodHertz(50); m1.attach(PIN_M1_FL, 1000, 2000);
-  m2.setPeriodHertz(50); m2.attach(PIN_M2_FR, 1000, 2000);
-  m3.setPeriodHertz(50); m3.attach(PIN_M3_RL, 1000, 2000);
-  m4.setPeriodHertz(50); m4.attach(PIN_M4_RR, 1000, 2000);
-  motorsOff();
 
   Wire.begin(I2C_SDA, I2C_SCL);
-  mpu.initialize();
-  mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_250);
-  mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_4);
-  mpuOK = true;
+  initMPU();
 
-  // Calibrate — keep flat
-  Serial.println("Calibrating IMU...");
-  delay(1000);
-  for (int i = 0; i < 500; i++) {
-    int16_t ax,ay,az,gx,gy,gz;
-    mpu.getMotion6(&ax,&ay,&az,&gx,&gy,&gz);
-    float rawAccX=-( ay/8192.0), rawAccY=(az/8192.0), rawAccZ=(ax/8192.0);
-    gyroX_offset     += gy/131.0;
-    accAngleX_offset += atan2(rawAccY, rawAccZ) * 180.0/PI;
-    delay(3);
-  }
-  gyroX_offset     /= 500;
-  accAngleX_offset /= 500;
-
-  // Cold start
-  {
-    int16_t ax,ay,az,gx,gy,gz;
-    mpu.getMotion6(&ax,&ay,&az,&gx,&gy,&gz);
-    float accX=-(ay/8192.0), accY=(az/8192.0), accZ=(ax/8192.0);
-    roll = (atan2(accY,accZ)*180.0/PI) - accAngleX_offset;
+  // RC setup
+  for (int i=0;i<6;i++) {
+    pinMode(pins[i], INPUT);
   }
 
-  Serial.println("ESCs arming — 3s...");
-  motorsOff();
-  delay(3000);
-  Serial.println("Ready! Arm: THR LOW + RUD RIGHT (2s)");
-  Serial.println("AUX1 knob = P gain (0-10), AUX2 knob = D gain (0-2)");
+  attachInterrupt(pins[0], isr0, CHANGE);
+  attachInterrupt(pins[1], isr1, CHANGE);
+  attachInterrupt(pins[2], isr2, CHANGE);
+  attachInterrupt(pins[3], isr3, CHANGE);
+  attachInterrupt(pins[4], isr4, CHANGE);
+  attachInterrupt(pins[5], isr5, CHANGE);
 
-  lastLoopTime = micros();
+  // ESC setup
+  m1.attach(PIN_M1_FL, 1000, 2000);
+  m2.attach(PIN_M2_FR, 1000, 2000);
+  m3.attach(PIN_M3_RL, 1000, 2000);
+  m4.attach(PIN_M4_RR, 1000, 2000);
+
+  lastTime = micros();
 }
 
-// ═══════════════════════════════════════════════════
-//  LOOP
-// ═══════════════════════════════════════════════════
-
+// ========= LOOP =========
 void loop() {
-  uint32_t nowUs = micros();
-  float dt = (nowUs - lastLoopTime) / 1000000.0;
-  lastLoopTime = nowUs;
-  dt = constrain(dt, 0.001, 0.05);
+  unsigned long now = micros();
+  float dt = (now - lastTime) / 1e6;
+  lastTime = now;
 
-  // RC
-  thr  = normalizeThrottle(rcRaw[2], RC[2]);
-  ail  = normalizeStick(rcRaw[0],    RC[0]);
-  rud  = normalizeStick(rcRaw[3],    RC[3]);
-  aux1 = normalizeThrottle(rcRaw[4], RC[4]);  // 0.0 - 1.0
-  aux2 = normalizeThrottle(rcRaw[5], RC[5]);  // 0.0 - 1.0
+  if (dt <= 0 || dt > 0.02) return;
 
-  // ── Live PID tuning via knobs ─────────────────────
-  rollPID.kp = aux1 * 10.0;   // AUX1 full left=0, full right=10
-  rollPID.kd = aux2 *  2.0;   // AUX2 full left=0, full right=2
-  // ki stays 0 during tuning — add it after P and D are good
+  readMPU(dt);
 
-  bool signalLost = (rcRaw[2] < 800 || rcRaw[2] > 2200);
-  if (signalLost) { motorsOff(); armed = false; return; }
+  // ========= RC NORMALIZATION =========
+  float ail = (ch[0] - 1500) / 500.0;
+  float thr = (ch[2] - 1000) / 1000.0;
 
-  // IMU
-  if (mpuOK) readIMU(dt);
+  thr = constrain(thr, 0, 1);
 
-  // ── Arm / Disarm ──────────────────────────────────
-  static uint32_t armTimer = 0, disarmTimer = 0;
-  uint32_t nowMs = millis();
+  float rollSP = ail * 10.0;
 
-  if (!armed) {
-    if (thr < 0.05 && rud > 0.8) {
-      if (armTimer == 0) armTimer = nowMs;
-      if (nowMs - armTimer > 2000) {
-        armed = true;
-        rollPID.reset();
-        digitalWrite(PIN_LED, HIGH);
-        Serial.println("ARMED");
-        armTimer = 0;
-      }
-    } else { armTimer = 0; }
-    motorsOff();
-    return;
-  }
+  // ========= PID =========
+  float angleError = rollSP - roll;
+  float rateSP = computePID(anglePID, angleError, dt);
 
-  if (thr < 0.05 && rud < -0.8) {
-    if (disarmTimer == 0) disarmTimer = nowMs;
-    if (nowMs - disarmTimer > 2000) {
-      armed = false; motorsOff();
-      digitalWrite(PIN_LED, LOW);
-      Serial.println("DISARMED");
-      disarmTimer = 0; return;
-    }
-  } else { disarmTimer = 0; }
+  float rateError = rateSP - gyroRate;
+  float rollOut = computePID(ratePID, rateError, dt);
 
-  // ── Roll PID only ─────────────────────────────────
-  if (thr < 0.1) rollPID.integral = 0;  // no windup on ground
+  // ========= MOTOR MIX (ROLL ONLY) =========
+  float m1_out = thr + rollOut;
+  float m2_out = thr - rollOut;
+  float m3_out = thr + rollOut;
+  float m4_out = thr - rollOut;
 
-  float rollSP  = ail * 30.0;           // stick → ±30° setpoint
-  float rollOut = rollPID.compute(rollSP - roll, dt, gyroRollRate);
+  m1_out = constrain(m1_out, 0, 1);
+  m2_out = constrain(m2_out, 0, 1);
+  m3_out = constrain(m3_out, 0, 1);
+  m4_out = constrain(m4_out, 0, 1);
 
-  float pidScale = 0.01;
-  rollOut = constrain(rollOut * pidScale, -0.3, 0.3);
+  // ========= OUTPUT =========
+  m1.writeMicroseconds(1000 + m1_out * 1000);
+  m2.writeMicroseconds(1000 + m2_out * 1000);
+  m3.writeMicroseconds(1000 + m3_out * 1000);
+  m4.writeMicroseconds(1000 + m4_out * 1000);
 
-  // ── Motor mixing — ROLL ONLY ──────────────────────
-  // pitch=0, yaw=0 — only left/right motor differential
-  float base = max(thr, 0.05f);
-
-  writeMotors(
-    base + rollOut,   // FL — left side  ↑ when rolling right
-    base - rollOut,   // FR — right side ↓ when rolling right
-    base + rollOut,   // RL — left side  ↑ when rolling right
-    base - rollOut    // RR — right side ↓ when rolling right
-  );
-
-  // ── Serial output @ 10Hz ─────────────────────────
-  static uint32_t lastPrint = 0;
-  if (nowMs - lastPrint > 100) {
-    Serial.printf(
-      "ROLL:%+6.1f° | SP:%+5.1f° | ERR:%+5.1f° | OUT:%+.3f | "
-      "P:%.2f D:%.3f | "
-      "M1:%4d M2:%4d M3:%4d M4:%4d\n",
-      roll, rollSP, rollSP-roll, rollOut,
-      rollPID.kp, rollPID.kd,
-      motorUS[0], motorUS[1], motorUS[2], motorUS[3]
-    );
-    lastPrint = nowMs;
-  }
+  // ========= DEBUG =========
+  Serial.print("Roll:"); Serial.print(roll);
+  Serial.print(" SP:"); Serial.print(rollSP);
+  Serial.print(" OUT:"); Serial.println(rollOut);
 }

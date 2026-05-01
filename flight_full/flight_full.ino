@@ -90,72 +90,16 @@ float gyroX_offset = 0, gyroY_offset = 0, gyroZ_offset = 0;
 float accAngleX_offset = 0, accAngleY_offset = 0;
 
 float thr, ail, ele, rud, aux1, aux2;
-volatile uint32_t rcRiseTime[6] = {0};
-volatile int      rcRaw[6]      = {1000, 1500, 1000, 1500, 1000, 1500};
+int   rcRaw[6]     = {1000, 1500, 1000, 1500, 1000, 1500};
 int   motorUS[4]   = {1000, 1000, 1000, 1000};
-
-void IRAM_ATTR isr_ch1() {
-  if (digitalRead(PIN_CH1_AIL)) {
-    rcRiseTime[0] = micros();
-  } else if (rcRiseTime[0] > 0) {
-    uint32_t p = micros() - rcRiseTime[0];
-    if (p >= 800 && p <= 2200) rcRaw[0] = p;
-    rcRiseTime[0] = 0;
-  }
-}
-
-void IRAM_ATTR isr_ch2() {
-  if (digitalRead(PIN_CH2_ELE)) {
-    rcRiseTime[1] = micros();
-  } else if (rcRiseTime[1] > 0) {
-    uint32_t p = micros() - rcRiseTime[1];
-    if (p >= 800 && p <= 2200) rcRaw[1] = p;
-    rcRiseTime[1] = 0;
-  }
-}
-
-void IRAM_ATTR isr_ch3() {
-  if (digitalRead(PIN_CH3_THR)) {
-    rcRiseTime[2] = micros();
-  } else if (rcRiseTime[2] > 0) {
-    uint32_t p = micros() - rcRiseTime[2];
-    if (p >= 800 && p <= 2200) rcRaw[2] = p;
-    rcRiseTime[2] = 0;
-  }
-}
-
-void IRAM_ATTR isr_ch4() {
-  if (digitalRead(PIN_CH4_RUD)) {
-    rcRiseTime[3] = micros();
-  } else if (rcRiseTime[3] > 0) {
-    uint32_t p = micros() - rcRiseTime[3];
-    if (p >= 800 && p <= 2200) rcRaw[3] = p;
-    rcRiseTime[3] = 0;
-  }
-}
-
-void IRAM_ATTR isr_ch5() {
-  if (digitalRead(PIN_CH5_AUX1)) {
-    rcRiseTime[4] = micros();
-  } else if (rcRiseTime[4] > 0) {
-    uint32_t p = micros() - rcRiseTime[4];
-    if (p >= 800 && p <= 2200) rcRaw[4] = p;
-    rcRiseTime[4] = 0;
-  }
-}
-
-void IRAM_ATTR isr_ch6() {
-  if (digitalRead(PIN_CH6_AUX2)) {
-    rcRiseTime[5] = micros();
-  } else if (rcRiseTime[5] > 0) {
-    uint32_t p = micros() - rcRiseTime[5];
-    if (p >= 800 && p <= 2200) rcRaw[5] = p;
-    rcRiseTime[5] = 0;
-  }
-}
 
 uint32_t lastLoopTime = 0;
 uint32_t lastRCTime   = 0;
+
+// ── Read PWM using pulseIn (simple, blocking, but reliable) ─────────────────
+int readPWM(int pin) {
+  return pulseIn(pin, HIGH, 25000);
+}
 
 enum LEDPattern { LED_BOOT, LED_READY, LED_ARMED, LED_NOSIGNAL, LED_SENSOR_ERR };
 LEDPattern ledPattern = LED_BOOT;
@@ -339,13 +283,6 @@ void setup() {
   pinMode(PIN_CH5_AUX1, INPUT);
   pinMode(PIN_CH6_AUX2, INPUT);
 
-  attachInterrupt(PIN_CH1_AIL,  isr_ch1, CHANGE);
-  attachInterrupt(PIN_CH2_ELE,  isr_ch2, CHANGE);
-  attachInterrupt(PIN_CH3_THR,  isr_ch3, CHANGE);
-  attachInterrupt(PIN_CH4_RUD,  isr_ch4, CHANGE);
-  attachInterrupt(PIN_CH5_AUX1, isr_ch5, CHANGE);
-  attachInterrupt(PIN_CH6_AUX2, isr_ch6, CHANGE);
-
   // ESCs
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
@@ -462,7 +399,13 @@ void loop() {
   dt = constrain(dt, 0.001, 0.05);
 
   // ── Read RC ───────────────────────────────────────
-  // rcRaw is updated via interrupts automatically
+  // Read PWM pulses from RC receiver
+  rcRaw[0] = readPWM(PIN_CH1_AIL);
+  rcRaw[1] = readPWM(PIN_CH2_ELE);
+  rcRaw[2] = readPWM(PIN_CH3_THR);
+  rcRaw[3] = readPWM(PIN_CH4_RUD);
+  rcRaw[4] = readPWM(PIN_CH5_AUX1);
+  rcRaw[5] = readPWM(PIN_CH6_AUX2);
 
   thr  = normalizeThrottle(rcRaw[2], RC[2]);
   ail  = normalizeStick(rcRaw[0], RC[0]);
