@@ -32,7 +32,29 @@
 
 
 #include <Wire.h>                                    //Include the Wire.h library so we can communicate with the gyro.
-#include <EEPROM.h>                                  //Include the EEPROM.h library so we can store information onto the EEPROM
+#include <Preferences.h>                          //Include the Preferences.h library for NVS storage (replaces EEPROM)
+#include <Adafruit_INA219.h>                      //Include the INA219 library for battery monitoring
+
+//ESP32 Pin Definitions
+#define ESC_1_PIN 26                              //GPIO26 for ESC 1
+#define ESC_2_PIN 27                              //GPIO27 for ESC 2
+#define ESC_3_PIN 14                              //GPIO14 for ESC 3
+#define ESC_4_PIN 12                              //GPIO12 for ESC 4
+#define RX_CH1_PIN 33                             //GPIO33 for receiver channel 1 (roll)
+#define RX_CH2_PIN 32                             //GPIO32 for receiver channel 2 (pitch)
+#define RX_CH3_PIN 25                             //GPIO25 for receiver channel 3 (throttle)
+#define RX_CH4_PIN 39                             //GPIO39 for receiver channel 4 (yaw)
+#define STATUS_LED_PIN 4                          //GPIO4 for status LED
+#define I2C_SDA_PIN 21                            //GPIO21 for I2C SDA
+#define I2C_SCL_PIN 22                            //GPIO22 for I2C SCL
+
+//LEDC PWM Configuration
+#define LEDC_FREQ 50                              //50Hz PWM frequency for ESCs
+#define LEDC_RESOLUTION 16                        //16-bit resolution for PWM
+
+//Global objects
+Preferences preferences;                          //Preferences object for NVS storage
+Adafruit_INA219 ina219(0x40);                    //INA219 object for battery monitoring
 
 //Declaring global variables
 byte last_channel_1, last_channel_2, last_channel_3, last_channel_4;
@@ -57,29 +79,81 @@ double gyro_axis_cal[4];
 //Setup routine
 void setup(){
   Serial.begin(57600);                                                                  //Start the serial port.
-  Wire.begin();                                                                         //Start the wire library as master
-  TWBR = 12;                                                                            //Set the I2C clock speed to 400kHz.
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);                                                //Start the wire library as master
+  Wire.setClock(400000);                                                               //Set the I2C clock speed to 400kHz.
 
-  //Arduino Uno pins default to inputs, so they don't need to be explicitly declared as inputs.
-  DDRD |= B11110000;                                                                    //Configure digital poort 4, 5, 6 and 7 as output.
-  DDRB |= B00010000;                                                                    //Configure digital poort 12 as output.
+  //Initialize LEDC PWM for ESCs (replaces DDRD/DDRB)
+  ledcSetup(0, LEDC_FREQ, LEDC_RESOLUTION);     //Channel 0: ESC1
+  ledcSetup(1, LEDC_FREQ, LEDC_RESOLUTION);     //Channel 1: ESC2
+  ledcSetup(2, LEDC_FREQ, LEDC_RESOLUTION);     //Channel 2: ESC3
+  ledcSetup(3, LEDC_FREQ, LEDC_RESOLUTION);     //Channel 3: ESC4
+  
+  ledcAttachPin(ESC_1_PIN, 0);                   //Attach ESC1 to channel 0
+  ledcAttachPin(ESC_2_PIN, 1);                   //Attach ESC2 to channel 1
+  ledcAttachPin(ESC_3_PIN, 2);                   //Attach ESC3 to channel 2
+  ledcAttachPin(ESC_4_PIN, 3);                   //Attach ESC4 to channel 3
+  
+  pinMode(STATUS_LED_PIN, OUTPUT);              //GPIO4 for status LED
 
-  PCICR |= (1 << PCIE0);                                                                // set PCIE0 to enable PCMSK0 scan.
-  PCMSK0 |= (1 << PCINT0);                                                              // set PCINT0 (digital input 8) to trigger an interrupt on state change.
-  PCMSK0 |= (1 << PCINT1);                                                              // set PCINT1 (digital input 9)to trigger an interrupt on state change.
-  PCMSK0 |= (1 << PCINT2);                                                              // set PCINT2 (digital input 10)to trigger an interrupt on state change.
-  PCMSK0 |= (1 << PCINT3);                                                              // set PCINT3 (digital input 11)to trigger an interrupt on state change.
+  //Attach receiver interrupts
+  pinMode(RX_CH1_PIN, INPUT_PULLUP);
+  pinMode(RX_CH2_PIN, INPUT_PULLUP);
+  pinMode(RX_CH3_PIN, INPUT_PULLUP);
+  pinMode(RX_CH4_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(RX_CH1_PIN), isr_ch1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(RX_CH2_PIN), isr_ch2, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(RX_CH3_PIN), isr_ch3, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(RX_CH4_PIN), isr_ch4, CHANGE);
 
-  for(data = 0; data <= 35; data++)eeprom_data[data] = EEPROM.read(data);               //Read EEPROM for faster data access
+  //Read Preferences data
+  preferences.begin("quadcopter", true);        //Open namespace in read-only mode
+  for(data = 0; data <= 35; data++) {
+    if(data == 0) eeprom_data[data] = preferences.getInt("center_ch1", 0) & 0xFF;
+    else if(data == 1) eeprom_data[data] = (preferences.getInt("center_ch1", 0) >> 8) & 0xFF;
+    else if(data == 2) eeprom_data[data] = preferences.getInt("center_ch2", 0) & 0xFF;
+    else if(data == 3) eeprom_data[data] = (preferences.getInt("center_ch2", 0) >> 8) & 0xFF;
+    else if(data == 4) eeprom_data[data] = preferences.getInt("center_ch3", 0) & 0xFF;
+    else if(data == 5) eeprom_data[data] = (preferences.getInt("center_ch3", 0) >> 8) & 0xFF;
+    else if(data == 6) eeprom_data[data] = preferences.getInt("center_ch4", 0) & 0xFF;
+    else if(data == 7) eeprom_data[data] = (preferences.getInt("center_ch4", 0) >> 8) & 0xFF;
+    else if(data == 8) eeprom_data[data] = preferences.getInt("high_ch1", 0) & 0xFF;
+    else if(data == 9) eeprom_data[data] = (preferences.getInt("high_ch1", 0) >> 8) & 0xFF;
+    else if(data == 10) eeprom_data[data] = preferences.getInt("high_ch2", 0) & 0xFF;
+    else if(data == 11) eeprom_data[data] = (preferences.getInt("high_ch2", 0) >> 8) & 0xFF;
+    else if(data == 12) eeprom_data[data] = preferences.getInt("high_ch3", 0) & 0xFF;
+    else if(data == 13) eeprom_data[data] = (preferences.getInt("high_ch3", 0) >> 8) & 0xFF;
+    else if(data == 14) eeprom_data[data] = preferences.getInt("high_ch4", 0) & 0xFF;
+    else if(data == 15) eeprom_data[data] = (preferences.getInt("high_ch4", 0) >> 8) & 0xFF;
+    else if(data == 16) eeprom_data[data] = preferences.getInt("low_ch1", 0) & 0xFF;
+    else if(data == 17) eeprom_data[data] = (preferences.getInt("low_ch1", 0) >> 8) & 0xFF;
+    else if(data == 18) eeprom_data[data] = preferences.getInt("low_ch2", 0) & 0xFF;
+    else if(data == 19) eeprom_data[data] = (preferences.getInt("low_ch2", 0) >> 8) & 0xFF;
+    else if(data == 20) eeprom_data[data] = preferences.getInt("low_ch3", 0) & 0xFF;
+    else if(data == 21) eeprom_data[data] = (preferences.getInt("low_ch3", 0) >> 8) & 0xFF;
+    else if(data == 22) eeprom_data[data] = preferences.getInt("low_ch4", 0) & 0xFF;
+    else if(data == 23) eeprom_data[data] = (preferences.getInt("low_ch4", 0) >> 8) & 0xFF;
+    else if(data == 24) eeprom_data[data] = preferences.getChar("ch1_assign", 0);
+    else if(data == 25) eeprom_data[data] = preferences.getChar("ch2_assign", 0);
+    else if(data == 26) eeprom_data[data] = preferences.getChar("ch3_assign", 0);
+    else if(data == 27) eeprom_data[data] = preferences.getChar("ch4_assign", 0);
+    else if(data == 28) eeprom_data[data] = preferences.getChar("roll_axis", 0);
+    else if(data == 29) eeprom_data[data] = preferences.getChar("pitch_axis", 0);
+    else if(data == 30) eeprom_data[data] = preferences.getChar("yaw_axis", 0);
+    else if(data == 31) eeprom_data[data] = preferences.getChar("gyro_type", 0);
+    else if(data == 32) eeprom_data[data] = preferences.getChar("gyro_addr", 0);
+    else if(data == 33) eeprom_data[data] = preferences.getChar("sig_1", ' ');
+    else if(data == 34) eeprom_data[data] = preferences.getChar("sig_2", ' ');
+    else if(data == 35) eeprom_data[data] = preferences.getChar("sig_3", ' ');
+  }
 
   gyro_address = eeprom_data[32];                                                       //Store the gyro address in the variable.
 
   set_gyro_registers();                                                                 //Set the specific gyro registers.
 
-  //Check the EEPROM signature to make sure that the setup program is executed.
+  //Check the Preferences signature
   while(eeprom_data[33] != 'J' || eeprom_data[34] != 'M' || eeprom_data[35] != 'B'){
     delay(500);                                                                         //Wait for 500ms.
-    digitalWrite(12, !digitalRead(12));                                                 //Change the led status to indicate error.
+    digitalWrite(STATUS_LED_PIN, !digitalRead(STATUS_LED_PIN));                         //Change the led status to indicate error.
   }
   wait_for_receiver();                                                                  //Wait until the receiver is active.
   zero_timer = micros();                                                                //Set the zero_timer for the first loop.
@@ -244,10 +318,8 @@ void loop(){
         gyro_axis_cal[1] += gyro_axis[1];                                               //Ad roll value to gyro_roll_cal.
         gyro_axis_cal[2] += gyro_axis[2];                                               //Ad pitch value to gyro_pitch_cal.
         gyro_axis_cal[3] += gyro_axis[3];                                               //Ad yaw value to gyro_yaw_cal.
-        //We don't want the esc's to be beeping annoyingly. So let's give them a 1000us puls while calibrating the gyro.
-        PORTD |= B11110000;                                                             //Set digital poort 4, 5, 6 and 7 high.
-        delayMicroseconds(1000);                                                        //Wait 1000us.
-        PORTD &= B00001111;                                                             //Set digital poort 4, 5, 6 and 7 low.
+        //Send 1000us pulse while calibrating (replaces PORTD operations)
+        setEscPulse(1000, 1000, 1000, 1000);
         delay(3);                                                                       //Wait 3 milliseconds before the next loop.
       }
       Serial.println(".");
@@ -257,10 +329,8 @@ void loop(){
       gyro_axis_cal[3] /= 2000;                                                         //Divide the yaw total by 2000.
     }
     else{
-      ///We don't want the esc's to be beeping annoyingly. So let's give them a 1000us puls while calibrating the gyro.
-      PORTD |= B11110000;                                                               //Set digital poort 4, 5, 6 and 7 high.
-      delayMicroseconds(1000);                                                          //Wait 1000us.
-      PORTD &= B00001111;                                                               //Set digital poort 4, 5, 6 and 7 low.
+      ///Send 1000us pulse while calibrating (replaces PORTD operations)
+      setEscPulse(1000, 1000, 1000, 1000);
 
       //Let's get the current gyro data.
       gyro_signalen();
@@ -307,52 +377,64 @@ void loop(){
 
 
 
-//This routine is called every time input 8, 9, 10 or 11 changed state.
-ISR(PCINT0_vect){
+//Interrupt service routines for receiver channels (ESP32 version)
+//Channel 1 interrupt handler
+void isr_ch1(){
   current_time = micros();
-  //Channel 1=========================================
-  if(PINB & B00000001){                                        //Is input 8 high?
-    if(last_channel_1 == 0){                                   //Input 8 changed from 0 to 1.
-      last_channel_1 = 1;                                      //Remember current input state.
-      timer_1 = current_time;                                  //Set timer_1 to current_time.
+  if(digitalRead(RX_CH1_PIN)){
+    if(last_channel_1 == 0){
+      last_channel_1 = 1;
+      timer_1 = current_time;
     }
   }
-  else if(last_channel_1 == 1){                                //Input 8 is not high and changed from 1 to 0.
-    last_channel_1 = 0;                                        //Remember current input state.
-    receiver_input[1] = current_time - timer_1;                 //Channel 1 is current_time - timer_1.
+  else if(last_channel_1 == 1){
+    last_channel_1 = 0;
+    receiver_input[1] = current_time - timer_1;
   }
-  //Channel 2=========================================
-  if(PINB & B00000010 ){                                       //Is input 9 high?
-    if(last_channel_2 == 0){                                   //Input 9 changed from 0 to 1.
-      last_channel_2 = 1;                                      //Remember current input state.
-      timer_2 = current_time;                                  //Set timer_2 to current_time.
+}
+
+//Channel 2 interrupt handler
+void isr_ch2(){
+  current_time = micros();
+  if(digitalRead(RX_CH2_PIN)){
+    if(last_channel_2 == 0){
+      last_channel_2 = 1;
+      timer_2 = current_time;
     }
   }
-  else if(last_channel_2 == 1){                                //Input 9 is not high and changed from 1 to 0.
-    last_channel_2 = 0;                                        //Remember current input state.
-    receiver_input[2] = current_time - timer_2;                //Channel 2 is current_time - timer_2.
+  else if(last_channel_2 == 1){
+    last_channel_2 = 0;
+    receiver_input[2] = current_time - timer_2;
   }
-  //Channel 3=========================================
-  if(PINB & B00000100 ){                                       //Is input 10 high?
-    if(last_channel_3 == 0){                                   //Input 10 changed from 0 to 1.
-      last_channel_3 = 1;                                      //Remember current input state.
-      timer_3 = current_time;                                  //Set timer_3 to current_time.
+}
+
+//Channel 3 interrupt handler
+void isr_ch3(){
+  current_time = micros();
+  if(digitalRead(RX_CH3_PIN)){
+    if(last_channel_3 == 0){
+      last_channel_3 = 1;
+      timer_3 = current_time;
     }
   }
-  else if(last_channel_3 == 1){                                //Input 10 is not high and changed from 1 to 0.
-    last_channel_3 = 0;                                        //Remember current input state.
-    receiver_input[3] = current_time - timer_3;                //Channel 3 is current_time - timer_3.
+  else if(last_channel_3 == 1){
+    last_channel_3 = 0;
+    receiver_input[3] = current_time - timer_3;
   }
-  //Channel 4=========================================
-  if(PINB & B00001000 ){                                       //Is input 11 high?
-    if(last_channel_4 == 0){                                   //Input 11 changed from 0 to 1.
-      last_channel_4 = 1;                                      //Remember current input state.
-      timer_4 = current_time;                                  //Set timer_4 to current_time.
+}
+
+//Channel 4 interrupt handler
+void isr_ch4(){
+  current_time = micros();
+  if(digitalRead(RX_CH4_PIN)){
+    if(last_channel_4 == 0){
+      last_channel_4 = 1;
+      timer_4 = current_time;
     }
   }
-  else if(last_channel_4 == 1){                                //Input 11 is not high and changed from 1 to 0.
-    last_channel_4 = 0;                                        //Remember current input state.
-    receiver_input[4] = current_time - timer_4;                //Channel 4 is current_time - timer_4.
+  else if(last_channel_4 == 1){
+    last_channel_4 = 0;
+    receiver_input[4] = current_time - timer_4;
   }
 }
 
@@ -429,20 +511,23 @@ void print_signals(){
 }
 
 void esc_pulse_output(){
-  zero_timer = micros();
-  PORTD |= B11110000;                                            //Set port 4, 5, 6 and 7 high at once
-  timer_channel_1 = esc_1 + zero_timer;                          //Calculate the time when digital port 4 is set low.
-  timer_channel_2 = esc_2 + zero_timer;                          //Calculate the time when digital port 5 is set low.
-  timer_channel_3 = esc_3 + zero_timer;                          //Calculate the time when digital port 6 is set low.
-  timer_channel_4 = esc_4 + zero_timer;                          //Calculate the time when digital port 7 is set low.
+  //Use LEDC PWM instead of manual timing (replaces PORTD operations)
+  setEscPulse(esc_1, esc_2, esc_3, esc_4);
+}
 
-  while(PORTD >= 16){                                            //Execute the loop until digital port 4 to 7 is low.
-    esc_loop_timer = micros();                                   //Check the current time.
-    if(timer_channel_1 <= esc_loop_timer)PORTD &= B11101111;     //When the delay time is expired, digital port 4 is set low.
-    if(timer_channel_2 <= esc_loop_timer)PORTD &= B11011111;     //When the delay time is expired, digital port 5 is set low.
-    if(timer_channel_3 <= esc_loop_timer)PORTD &= B10111111;     //When the delay time is expired, digital port 6 is set low.
-    if(timer_channel_4 <= esc_loop_timer)PORTD &= B01111111;     //When the delay time is expired, digital port 7 is set low.
-  }
+//Helper function to set ESC pulse widths using LEDC PWM
+void setEscPulse(int pulse1, int pulse2, int pulse3, int pulse4){
+  //Convert microsecond pulse width to 16-bit LEDC value (20ms = 50Hz period = 65535 counts)
+  //Formula: (pulse_us / 20000) * 65535
+  uint32_t value1 = (pulse1 * 65535) / 20000;
+  uint32_t value2 = (pulse2 * 65535) / 20000;
+  uint32_t value3 = (pulse3 * 65535) / 20000;
+  uint32_t value4 = (pulse4 * 65535) / 20000;
+  
+  ledcWrite(0, value1);  //Channel 0: ESC1
+  ledcWrite(1, value2);  //Channel 1: ESC2
+  ledcWrite(2, value3);  //Channel 2: ESC3
+  ledcWrite(3, value4);  //Channel 3: ESC4
 }
 
 void set_gyro_registers(){

@@ -16,7 +16,29 @@
 ///////////////////////////////////////////////////////////////////////////////////////
 
 #include <Wire.h>                          //Include the Wire.h library so we can communicate with the gyro.
-#include <EEPROM.h>                        //Include the EEPROM.h library so we can store information onto the EEPROM
+#include <Preferences.h>                  //Include the Preferences.h library for NVS storage (replaces EEPROM)
+#include <Adafruit_INA219.h>              //Include the INA219 library for battery monitoring
+
+//ESP32 Pin Definitions
+#define ESC_1_PIN 26                      //GPIO26 for ESC 1 (front-right CCW) - LEDC channel 0
+#define ESC_2_PIN 27                      //GPIO27 for ESC 2 (rear-right CW) - LEDC channel 1
+#define ESC_3_PIN 14                      //GPIO14 for ESC 3 (rear-left CCW) - LEDC channel 2
+#define ESC_4_PIN 12                      //GPIO12 for ESC 4 (front-left CW) - LEDC channel 3
+#define RX_CH1_PIN 33                     //GPIO33 for receiver channel 1 (roll)
+#define RX_CH2_PIN 32                     //GPIO32 for receiver channel 2 (pitch)
+#define RX_CH3_PIN 25                     //GPIO25 for receiver channel 3 (throttle)
+#define RX_CH4_PIN 39                     //GPIO39 for receiver channel 4 (yaw)
+#define STATUS_LED_PIN 4                  //GPIO4 for status LED
+#define I2C_SDA_PIN 21                    //GPIO21 for I2C SDA
+#define I2C_SCL_PIN 22                    //GPIO22 for I2C SCL
+
+//LEDC PWM Configuration
+#define LEDC_FREQ 50                      //50Hz PWM frequency for ESCs
+#define LEDC_RESOLUTION 16                //16-bit resolution for PWM (0-65535)
+
+//Global objects for sensors
+Preferences preferences;                  //Preferences object for NVS storage
+Adafruit_INA219 ina219(0x40);            //INA219 object for battery monitoring
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //PID gain and limit settings
@@ -71,92 +93,141 @@ boolean gyro_angles_set;
 //Setup routine
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 void setup(){
-  //Serial.begin(57600);
-  //Copy the EEPROM data for fast access data.
-  for(start = 0; start <= 35; start++)eeprom_data[start] = EEPROM.read(start);
-  start = 0;                                                                //Set start back to zero.
-  gyro_address = eeprom_data[32];                                           //Store the gyro address in the variable.
+  //Serial MUST be first for debug output
+  Serial.begin(57600);                      //Start serial at 57600 bps
+  delay(100);
+  
+  //Copy the Preferences data for fast access (replaces EEPROM read)
+  preferences.begin("quadcopter", true);    //Open namespace in read-only mode
+  for(start = 0; start <= 35; start++) {
+    if(start == 0) eeprom_data[start] = preferences.getInt("center_ch1", 0) & 0xFF;
+    else if(start == 1) eeprom_data[start] = (preferences.getInt("center_ch1", 0) >> 8) & 0xFF;
+    else if(start == 2) eeprom_data[start] = preferences.getInt("center_ch2", 0) & 0xFF;
+    else if(start == 3) eeprom_data[start] = (preferences.getInt("center_ch2", 0) >> 8) & 0xFF;
+    else if(start == 4) eeprom_data[start] = preferences.getInt("center_ch3", 0) & 0xFF;
+    else if(start == 5) eeprom_data[start] = (preferences.getInt("center_ch3", 0) >> 8) & 0xFF;
+    else if(start == 6) eeprom_data[start] = preferences.getInt("center_ch4", 0) & 0xFF;
+    else if(start == 7) eeprom_data[start] = (preferences.getInt("center_ch4", 0) >> 8) & 0xFF;
+    else if(start == 8) eeprom_data[start] = preferences.getInt("high_ch1", 0) & 0xFF;
+    else if(start == 9) eeprom_data[start] = (preferences.getInt("high_ch1", 0) >> 8) & 0xFF;
+    else if(start == 10) eeprom_data[start] = preferences.getInt("high_ch2", 0) & 0xFF;
+    else if(start == 11) eeprom_data[start] = (preferences.getInt("high_ch2", 0) >> 8) & 0xFF;
+    else if(start == 12) eeprom_data[start] = preferences.getInt("high_ch3", 0) & 0xFF;
+    else if(start == 13) eeprom_data[start] = (preferences.getInt("high_ch3", 0) >> 8) & 0xFF;
+    else if(start == 14) eeprom_data[start] = preferences.getInt("high_ch4", 0) & 0xFF;
+    else if(start == 15) eeprom_data[start] = (preferences.getInt("high_ch4", 0) >> 8) & 0xFF;
+    else if(start == 16) eeprom_data[start] = preferences.getInt("low_ch1", 0) & 0xFF;
+    else if(start == 17) eeprom_data[start] = (preferences.getInt("low_ch1", 0) >> 8) & 0xFF;
+    else if(start == 18) eeprom_data[start] = preferences.getInt("low_ch2", 0) & 0xFF;
+    else if(start == 19) eeprom_data[start] = (preferences.getInt("low_ch2", 0) >> 8) & 0xFF;
+    else if(start == 20) eeprom_data[start] = preferences.getInt("low_ch3", 0) & 0xFF;
+    else if(start == 21) eeprom_data[start] = (preferences.getInt("low_ch3", 0) >> 8) & 0xFF;
+    else if(start == 22) eeprom_data[start] = preferences.getInt("low_ch4", 0) & 0xFF;
+    else if(start == 23) eeprom_data[start] = (preferences.getInt("low_ch4", 0) >> 8) & 0xFF;
+    else if(start == 24) eeprom_data[start] = preferences.getChar("ch1_assign", 0);
+    else if(start == 25) eeprom_data[start] = preferences.getChar("ch2_assign", 0);
+    else if(start == 26) eeprom_data[start] = preferences.getChar("ch3_assign", 0);
+    else if(start == 27) eeprom_data[start] = preferences.getChar("ch4_assign", 0);
+    else if(start == 28) eeprom_data[start] = preferences.getChar("roll_axis", 0);
+    else if(start == 29) eeprom_data[start] = preferences.getChar("pitch_axis", 0);
+    else if(start == 30) eeprom_data[start] = preferences.getChar("yaw_axis", 0);
+    else if(start == 31) eeprom_data[start] = preferences.getChar("gyro_type", 0);
+    else if(start == 32) eeprom_data[start] = preferences.getChar("gyro_addr", 0);
+    else if(start == 33) eeprom_data[start] = preferences.getChar("sig_1", ' ');
+    else if(start == 34) eeprom_data[start] = preferences.getChar("sig_2", ' ');
+    else if(start == 35) eeprom_data[start] = preferences.getChar("sig_3", ' ');
+  }
+  start = 0;
+  gyro_address = eeprom_data[32];
 
-  Wire.begin();                                                             //Start the I2C as master.
+  //Initialize I2C
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);      //Start I2C with ESP32 pins
+  Wire.setClock(400000);                     //Set I2C clock to 400kHz (replaces TWBR = 12)
 
-  TWBR = 12;                                                                //Set the I2C clock speed to 400kHz.
+  //Initialize LEDC PWM for ESCs (replaces DDRD/DDRB register setup)
+  ledcSetup(0, LEDC_FREQ, LEDC_RESOLUTION); //Channel 0: ESC1, 50Hz, 16-bit
+  ledcSetup(1, LEDC_FREQ, LEDC_RESOLUTION); //Channel 1: ESC2, 50Hz, 16-bit
+  ledcSetup(2, LEDC_FREQ, LEDC_RESOLUTION); //Channel 2: ESC3, 50Hz, 16-bit
+  ledcSetup(3, LEDC_FREQ, LEDC_RESOLUTION); //Channel 3: ESC4, 50Hz, 16-bit
+  
+  ledcAttachPin(ESC_1_PIN, 0);               //Attach ESC1 to channel 0
+  ledcAttachPin(ESC_2_PIN, 1);               //Attach ESC2 to channel 1
+  ledcAttachPin(ESC_3_PIN, 2);               //Attach ESC3 to channel 2
+  ledcAttachPin(ESC_4_PIN, 3);               //Attach ESC4 to channel 3
 
-  //Arduino (Atmega) pins default to inputs, so they don't need to be explicitly declared as inputs.
-  DDRD |= B11110000;                                                        //Configure digital poort 4, 5, 6 and 7 as output.
-  DDRB |= B00110000;                                                        //Configure digital poort 12 and 13 as output.
+  //Initialize status LED
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  digitalWrite(STATUS_LED_PIN, HIGH);
 
-  //Use the led on the Arduino for startup indication.
-  digitalWrite(12,HIGH);                                                    //Turn on the warning led.
+  //Initialize INA219 battery monitor
+  if (!ina219.begin(0x40)) {
+    Serial.println("ERROR: INA219 not found!");
+    while(1) delay(100);
+  }
 
-  //Check the EEPROM signature to make sure that the setup program is executed.
+  //Check the Preferences signature to make sure that the setup program is executed.
   while(eeprom_data[33] != 'J' || eeprom_data[34] != 'M' || eeprom_data[35] != 'B')delay(10);
 
   //The flight controller needs the MPU-6050 with gyro and accelerometer
   //If setup is completed without MPU-6050 stop the flight controller program  
   if(eeprom_data[31] == 2 || eeprom_data[31] == 3)delay(10);
 
-  set_gyro_registers();                                                     //Set the specific gyro registers.
+  set_gyro_registers();                      //Set the specific gyro registers.
 
-  for (cal_int = 0; cal_int < 1250 ; cal_int ++){                           //Wait 5 seconds before continuing.
-    PORTD |= B11110000;                                                     //Set digital poort 4, 5, 6 and 7 high.
-    delayMicroseconds(1000);                                                //Wait 1000us.
-    PORTD &= B00001111;                                                     //Set digital poort 4, 5, 6 and 7 low.
-    delayMicroseconds(3000);                                                //Wait 3000us.
+  //Send 1000us pulse to ESCs for 5 seconds during startup (replaces manual PORTD pulse)
+  for (cal_int = 0; cal_int < 1250 ; cal_int ++){
+    setEscPulse(1000, 1000, 1000, 1000);     //Send 1000us pulse to all ESCs
+    delayMicroseconds(3000);                 //Wait 3ms
   }
 
-  //Let's take multiple gyro data samples so we can determine the average gyro offset (calibration).
-  for (cal_int = 0; cal_int < 2000 ; cal_int ++){                           //Take 2000 readings for calibration.
-    if(cal_int % 15 == 0)digitalWrite(12, !digitalRead(12));                //Change the led status to indicate calibration.
-    gyro_signalen();                                                        //Read the gyro output.
-    gyro_axis_cal[1] += gyro_axis[1];                                       //Ad roll value to gyro_roll_cal.
-    gyro_axis_cal[2] += gyro_axis[2];                                       //Ad pitch value to gyro_pitch_cal.
-    gyro_axis_cal[3] += gyro_axis[3];                                       //Ad yaw value to gyro_yaw_cal.
-    //We don't want the esc's to be beeping annoyingly. So let's give them a 1000us puls while calibrating the gyro.
-    PORTD |= B11110000;                                                     //Set digital poort 4, 5, 6 and 7 high.
-    delayMicroseconds(1000);                                                //Wait 1000us.
-    PORTD &= B00001111;                                                     //Set digital poort 4, 5, 6 and 7 low.
-    delay(3);                                                               //Wait 3 milliseconds before the next loop.
+  //Let's take multiple gyro data samples for calibration
+  for (cal_int = 0; cal_int < 2000 ; cal_int ++){
+    if(cal_int % 15 == 0)digitalWrite(STATUS_LED_PIN, !digitalRead(STATUS_LED_PIN));
+    gyro_signalen();
+    gyro_axis_cal[1] += gyro_axis[1];
+    gyro_axis_cal[2] += gyro_axis[2];
+    gyro_axis_cal[3] += gyro_axis[3];
+    //Send 1000us pulse while calibrating
+    setEscPulse(1000, 1000, 1000, 1000);
+    delay(3);
   }
-  //Now that we have 2000 measures, we need to devide by 2000 to get the average gyro offset.
-  gyro_axis_cal[1] /= 2000;                                                 //Divide the roll total by 2000.
-  gyro_axis_cal[2] /= 2000;                                                 //Divide the pitch total by 2000.
-  gyro_axis_cal[3] /= 2000;                                                 //Divide the yaw total by 2000.
+  
+  //Calculate average gyro offset
+  gyro_axis_cal[1] /= 2000;
+  gyro_axis_cal[2] /= 2000;
+  gyro_axis_cal[3] /= 2000;
 
-  PCICR |= (1 << PCIE0);                                                    //Set PCIE0 to enable PCMSK0 scan.
-  PCMSK0 |= (1 << PCINT0);                                                  //Set PCINT0 (digital input 8) to trigger an interrupt on state change.
-  PCMSK0 |= (1 << PCINT1);                                                  //Set PCINT1 (digital input 9)to trigger an interrupt on state change.
-  PCMSK0 |= (1 << PCINT2);                                                  //Set PCINT2 (digital input 10)to trigger an interrupt on state change.
-  PCMSK0 |= (1 << PCINT3);                                                  //Set PCINT3 (digital input 11)to trigger an interrupt on state change.
+  //Attach receiver interrupts (replaces PCINT setup)
+  pinMode(RX_CH1_PIN, INPUT_PULLUP);
+  pinMode(RX_CH2_PIN, INPUT_PULLUP);
+  pinMode(RX_CH3_PIN, INPUT_PULLUP);
+  pinMode(RX_CH4_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(RX_CH1_PIN), isr_ch1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(RX_CH2_PIN), isr_ch2, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(RX_CH3_PIN), isr_ch3, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(RX_CH4_PIN), isr_ch4, CHANGE);
 
-  //Wait until the receiver is active and the throtle is set to the lower position.
+  //Wait until the receiver is active and throttle is low
   while(receiver_input_channel_3 < 990 || receiver_input_channel_3 > 1020 || receiver_input_channel_4 < 1400){
-    receiver_input_channel_3 = convert_receiver_channel(3);                 //Convert the actual receiver signals for throttle to the standard 1000 - 2000us
-    receiver_input_channel_4 = convert_receiver_channel(4);                 //Convert the actual receiver signals for yaw to the standard 1000 - 2000us
-    start ++;                                                               //While waiting increment start whith every loop.
-    //We don't want the esc's to be beeping annoyingly. So let's give them a 1000us puls while waiting for the receiver inputs.
-    PORTD |= B11110000;                                                     //Set digital poort 4, 5, 6 and 7 high.
-    delayMicroseconds(1000);                                                //Wait 1000us.
-    PORTD &= B00001111;                                                     //Set digital poort 4, 5, 6 and 7 low.
-    delay(3);                                                               //Wait 3 milliseconds before the next loop.
-    if(start == 125){                                                       //Every 125 loops (500ms).
-      digitalWrite(12, !digitalRead(12));                                   //Change the led status.
-      start = 0;                                                            //Start again at 0.
+    receiver_input_channel_3 = convert_receiver_channel(3);
+    receiver_input_channel_4 = convert_receiver_channel(4);
+    start ++;
+    setEscPulse(1000, 1000, 1000, 1000);     //Keep sending 1000us to ESCs
+    delay(3);
+    if(start == 125){
+      digitalWrite(STATUS_LED_PIN, !digitalRead(STATUS_LED_PIN));
+      start = 0;
     }
   }
-  start = 0;                                                                //Set start back to 0.
+  start = 0;
 
-  //Load the battery voltage to the battery_voltage variable.
-  //65 is the voltage compensation for the diode.
-  //12.6V equals ~5V @ Analog 0.
-  //12.6V equals 1023 analogRead(0).
-  //1260 / 1023 = 1.2317.
-  //The variable battery_voltage holds 1050 if the battery voltage is 10.5V.
-  battery_voltage = (analogRead(0) + 65) * 1.2317;
+  //Load battery voltage from INA219
+  battery_voltage = (int)(ina219.getBusVoltage_V() * 100); //Convert V to centi-volts
 
-  loop_timer = micros();                                                    //Set the timer for the next loop.
+  loop_timer = micros();
 
-  //When everything is done, turn off the led.
-  digitalWrite(12,LOW);                                                     //Turn off the warning led.
+  //Turn off LED
+  digitalWrite(STATUS_LED_PIN, LOW);
 }
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 //Main program loop
@@ -265,11 +336,11 @@ void loop(){
 
   //The battery voltage is needed for compensation.
   //A complementary filter is used to reduce noise.
-  //0.09853 = 0.08 * 1.2317.
-  battery_voltage = battery_voltage * 0.92 + (analogRead(0) + 65) * 0.09853;
+  //Update from INA219 instead of analogRead
+  battery_voltage = (int)((ina219.getBusVoltage_V() * 100) * 0.92 + (battery_voltage * 0.08));
 
-  //Turn on the led if battery voltage is to low.
-  if(battery_voltage < 1000 && battery_voltage > 600)digitalWrite(12, HIGH);
+  //Turn on the led if battery voltage is too low.
+  if(battery_voltage < 1000 && battery_voltage > 600)digitalWrite(STATUS_LED_PIN, HIGH);
 
 
   throttle = receiver_input_channel_3;                                      //We need the throttle signal as a base signal.
@@ -307,95 +378,100 @@ void loop(){
   }
 
   ////////////////////////////////////////////////////////////////////////////////////////////////////
-  //Creating the pulses for the ESC's is explained in this video:
-  //https://youtu.be/fqEkVcqxtU8
+  //Creating the pulses for the ESC's is now handled by LEDC PWM hardware (not manual timing)
   ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-  //! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
-  //Because of the angle calculation the loop time is getting very important. If the loop time is 
-  //longer or shorter than 4000us the angle calculation is off. If you modify the code make sure 
-  //that the loop time is still 4000us and no longer! More information can be found on 
-  //the Q&A page: 
-  //! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! ! !
-    
-  if(micros() - loop_timer > 4050)digitalWrite(12, HIGH);                   //Turn on the LED if the loop time exceeds 4050us.
+  if(micros() - loop_timer > 4050)digitalWrite(STATUS_LED_PIN, HIGH); //Turn on LED if loop time exceeds 4050us
   
-  //All the information for controlling the motor's is available.
-  //The refresh rate is 250Hz. That means the esc's need there pulse every 4ms.
-  while(micros() - loop_timer < 4000);                                      //We wait until 4000us are passed.
-  loop_timer = micros();                                                    //Set the timer for the next loop.
-
-  PORTD |= B11110000;                                                       //Set digital outputs 4,5,6 and 7 high.
-  timer_channel_1 = esc_1 + loop_timer;                                     //Calculate the time of the faling edge of the esc-1 pulse.
-  timer_channel_2 = esc_2 + loop_timer;                                     //Calculate the time of the faling edge of the esc-2 pulse.
-  timer_channel_3 = esc_3 + loop_timer;                                     //Calculate the time of the faling edge of the esc-3 pulse.
-  timer_channel_4 = esc_4 + loop_timer;                                     //Calculate the time of the faling edge of the esc-4 pulse.
+  //All the information for controlling the motors is available.
+  //The refresh rate is 250Hz. That means the ESCs need their pulse every 4ms.
+  while(micros() - loop_timer < 4000); //Wait until 4000us have passed
+  loop_timer = micros();
   
-  //There is always 1000us of spare time. So let's do something usefull that is very time consuming.
-  //Get the current gyro and receiver data and scale it to degrees per second for the pid calculations.
+  //Send ESC pulses using LEDC PWM (replaces manual PORTD timing)
+  setEscPulse(esc_1, esc_2, esc_3, esc_4);
+  
+  //Get the current gyro and receiver data
   gyro_signalen();
+}
 
-  while(PORTD >= 16){                                                       //Stay in this loop until output 4,5,6 and 7 are low.
-    esc_loop_timer = micros();                                              //Read the current time.
-    if(timer_channel_1 <= esc_loop_timer)PORTD &= B11101111;                //Set digital output 4 to low if the time is expired.
-    if(timer_channel_2 <= esc_loop_timer)PORTD &= B11011111;                //Set digital output 5 to low if the time is expired.
-    if(timer_channel_3 <= esc_loop_timer)PORTD &= B10111111;                //Set digital output 6 to low if the time is expired.
-    if(timer_channel_4 <= esc_loop_timer)PORTD &= B01111111;                //Set digital output 7 to low if the time is expired.
+///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+//Interrupt service routines for receiver channels (ESP32 version)
+//Channel 1 interrupt handler
+void isr_ch1(){
+  current_time = micros();
+  if(digitalRead(RX_CH1_PIN)){
+    if(last_channel_1 == 0){
+      last_channel_1 = 1;
+      timer_1 = current_time;
+    }
+  }
+  else if(last_channel_1 == 1){
+    last_channel_1 = 0;
+    receiver_input[1] = current_time - timer_1;
+  }
+}
+
+//Channel 2 interrupt handler
+void isr_ch2(){
+  current_time = micros();
+  if(digitalRead(RX_CH2_PIN)){
+    if(last_channel_2 == 0){
+      last_channel_2 = 1;
+      timer_2 = current_time;
+    }
+  }
+  else if(last_channel_2 == 1){
+    last_channel_2 = 0;
+    receiver_input[2] = current_time - timer_2;
+  }
+}
+
+//Channel 3 interrupt handler
+void isr_ch3(){
+  current_time = micros();
+  if(digitalRead(RX_CH3_PIN)){
+    if(last_channel_3 == 0){
+      last_channel_3 = 1;
+      timer_3 = current_time;
+    }
+  }
+  else if(last_channel_3 == 1){
+    last_channel_3 = 0;
+    receiver_input[3] = current_time - timer_3;
+  }
+}
+
+//Channel 4 interrupt handler
+void isr_ch4(){
+  current_time = micros();
+  if(digitalRead(RX_CH4_PIN)){
+    if(last_channel_4 == 0){
+      last_channel_4 = 1;
+      timer_4 = current_time;
+    }
+  }
+  else if(last_channel_4 == 1){
+    last_channel_4 = 0;
+    receiver_input[4] = current_time - timer_4;
   }
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-//This routine is called every time input 8, 9, 10 or 11 changed state. This is used to read the receiver signals. 
-//More information about this subroutine can be found in this video:
-//https://youtu.be/bENjl1KQbvo
+//Helper function to set ESC pulse widths using LEDC PWM
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-ISR(PCINT0_vect){
-  current_time = micros();
-  //Channel 1=========================================
-  if(PINB & B00000001){                                                     //Is input 8 high?
-    if(last_channel_1 == 0){                                                //Input 8 changed from 0 to 1.
-      last_channel_1 = 1;                                                   //Remember current input state.
-      timer_1 = current_time;                                               //Set timer_1 to current_time.
-    }
-  }
-  else if(last_channel_1 == 1){                                             //Input 8 is not high and changed from 1 to 0.
-    last_channel_1 = 0;                                                     //Remember current input state.
-    receiver_input[1] = current_time - timer_1;                             //Channel 1 is current_time - timer_1.
-  }
-  //Channel 2=========================================
-  if(PINB & B00000010 ){                                                    //Is input 9 high?
-    if(last_channel_2 == 0){                                                //Input 9 changed from 0 to 1.
-      last_channel_2 = 1;                                                   //Remember current input state.
-      timer_2 = current_time;                                               //Set timer_2 to current_time.
-    }
-  }
-  else if(last_channel_2 == 1){                                             //Input 9 is not high and changed from 1 to 0.
-    last_channel_2 = 0;                                                     //Remember current input state.
-    receiver_input[2] = current_time - timer_2;                             //Channel 2 is current_time - timer_2.
-  }
-  //Channel 3=========================================
-  if(PINB & B00000100 ){                                                    //Is input 10 high?
-    if(last_channel_3 == 0){                                                //Input 10 changed from 0 to 1.
-      last_channel_3 = 1;                                                   //Remember current input state.
-      timer_3 = current_time;                                               //Set timer_3 to current_time.
-    }
-  }
-  else if(last_channel_3 == 1){                                             //Input 10 is not high and changed from 1 to 0.
-    last_channel_3 = 0;                                                     //Remember current input state.
-    receiver_input[3] = current_time - timer_3;                             //Channel 3 is current_time - timer_3.
-
-  }
-  //Channel 4=========================================
-  if(PINB & B00001000 ){                                                    //Is input 11 high?
-    if(last_channel_4 == 0){                                                //Input 11 changed from 0 to 1.
-      last_channel_4 = 1;                                                   //Remember current input state.
-      timer_4 = current_time;                                               //Set timer_4 to current_time.
-    }
-  }
-  else if(last_channel_4 == 1){                                             //Input 11 is not high and changed from 1 to 0.
-    last_channel_4 = 0;                                                     //Remember current input state.
-    receiver_input[4] = current_time - timer_4;                             //Channel 4 is current_time - timer_4.
-  }
+void setEscPulse(int pulse1, int pulse2, int pulse3, int pulse4){
+  //Convert microsecond pulse width to 16-bit LEDC value (20ms = 50Hz period = 65535 counts)
+  //Formula: (pulse_us / 20000) * 65535
+  uint32_t value1 = (pulse1 * 65535) / 20000;
+  uint32_t value2 = (pulse2 * 65535) / 20000;
+  uint32_t value3 = (pulse3 * 65535) / 20000;
+  uint32_t value4 = (pulse4 * 65535) / 20000;
+  
+  ledcWrite(0, value1);  //Channel 0: ESC1
+  ledcWrite(1, value2);  //Channel 1: ESC2
+  ledcWrite(2, value3);  //Channel 2: ESC3
+  ledcWrite(3, value4);  //Channel 3: ESC4
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -544,7 +620,7 @@ void set_gyro_registers(){
     Wire.requestFrom(gyro_address, 1);                                         //Request 1 bytes from the gyro
     while(Wire.available() < 1);                                               //Wait until the 6 bytes are received
     if(Wire.read() != 0x08){                                                   //Check if the value is 0x08
-      digitalWrite(12,HIGH);                                                   //Turn on the warning led
+      digitalWrite(STATUS_LED_PIN,HIGH);                                       //Turn on the warning led
       while(1)delay(10);                                                       //Stay in this loop for ever
     }
 
