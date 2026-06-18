@@ -7,19 +7,19 @@ Servo esc1, esc2, esc3, esc4;
 // ── RC Input (PCINT2 ISR) ──
 volatile uint32_t rcRiseTime[NUM_CH] = {0};
 volatile uint16_t rcPulse[NUM_CH] = {0};
+volatile uint32_t rcFallTime[NUM_CH] = {0};
 volatile uint8_t lastPIND = 0;
-volatile bool rcUpdated = false;
 
 ISR(PCINT2_vect) {
   uint8_t nowPIND = PIND;
   uint8_t changed = nowPIND ^ lastPIND;
   uint32_t now = micros();
-  if (changed & (1 << PIN_CH1)) { if (nowPIND & (1 << PIN_CH1)) rcRiseTime[0] = now; else { rcPulse[0] = (uint16_t)(now - rcRiseTime[0]); rcUpdated = true; } }
-  if (changed & (1 << PIN_CH2)) { if (nowPIND & (1 << PIN_CH2)) rcRiseTime[1] = now; else { rcPulse[1] = (uint16_t)(now - rcRiseTime[1]); rcUpdated = true; } }
-  if (changed & (1 << PIN_CH3)) { if (nowPIND & (1 << PIN_CH3)) rcRiseTime[2] = now; else { rcPulse[2] = (uint16_t)(now - rcRiseTime[2]); rcUpdated = true; } }
-  if (changed & (1 << PIN_CH4)) { if (nowPIND & (1 << PIN_CH4)) rcRiseTime[3] = now; else { rcPulse[3] = (uint16_t)(now - rcRiseTime[3]); rcUpdated = true; } }
-  if (changed & (1 << PIN_CH5)) { if (nowPIND & (1 << PIN_CH5)) rcRiseTime[4] = now; else { rcPulse[4] = (uint16_t)(now - rcRiseTime[4]); } }
-  if (changed & (1 << PIN_CH6)) { if (nowPIND & (1 << PIN_CH6)) rcRiseTime[5] = now; else { rcPulse[5] = (uint16_t)(now - rcRiseTime[5]); } }
+  if (changed & (1 << PIN_CH1)) { if (nowPIND & (1 << PIN_CH1)) rcRiseTime[0] = now; else { rcPulse[0] = (uint16_t)(now - rcRiseTime[0]); rcFallTime[0] = now; } }
+  if (changed & (1 << PIN_CH2)) { if (nowPIND & (1 << PIN_CH2)) rcRiseTime[1] = now; else { rcPulse[1] = (uint16_t)(now - rcRiseTime[1]); rcFallTime[1] = now; } }
+  if (changed & (1 << PIN_CH3)) { if (nowPIND & (1 << PIN_CH3)) rcRiseTime[2] = now; else { rcPulse[2] = (uint16_t)(now - rcRiseTime[2]); rcFallTime[2] = now; } }
+  if (changed & (1 << PIN_CH4)) { if (nowPIND & (1 << PIN_CH4)) rcRiseTime[3] = now; else { rcPulse[3] = (uint16_t)(now - rcRiseTime[3]); rcFallTime[3] = now; } }
+  if (changed & (1 << PIN_CH5)) { if (nowPIND & (1 << PIN_CH5)) rcRiseTime[4] = now; else { rcPulse[4] = (uint16_t)(now - rcRiseTime[4]); rcFallTime[4] = now; } }
+  if (changed & (1 << PIN_CH6)) { if (nowPIND & (1 << PIN_CH6)) rcRiseTime[5] = now; else { rcPulse[5] = (uint16_t)(now - rcRiseTime[5]); rcFallTime[5] = now; } }
   lastPIND = nowPIND;
 }
 
@@ -34,7 +34,6 @@ const RCCh rcCal[NUM_CH] = {
 };
 
 uint16_t rcCopy[NUM_CH];
-uint32_t rcLastSeen = 0;
 
 int convertRC(byte ch) {
   uint16_t actual = rcCopy[ch];
@@ -137,7 +136,9 @@ void calculate_pid() {
   pid_last_pitch_d_error = pid_error_temp;
 
   pid_error_temp = gyro_yaw_input - pid_yaw_setpoint;
+  if (abs(pid_error_temp) < 1.5) pid_error_temp = 0;
   pid_i_mem_yaw += pid_i_gain_yaw * pid_error_temp;
+  pid_i_mem_yaw *= 0.999;
   if (pid_i_mem_yaw > pid_max_yaw) pid_i_mem_yaw = pid_max_yaw;
   else if (pid_i_mem_yaw < pid_max_yaw * -1) pid_i_mem_yaw = pid_max_yaw * -1;
   pid_output_yaw = pid_p_gain_yaw * pid_error_temp + pid_i_mem_yaw + pid_d_gain_yaw * (pid_error_temp - pid_last_yaw_d_error);
@@ -204,22 +205,27 @@ void setup() {
     writeMPU(0x1A, 0x03);
     writeMPU(0x1B, GYRO_FS_SEL);
     writeMPU(0x1C, ACCEL_FS_SEL);
+    writeMPU(0x13, 0); writeMPU(0x14, 0);
+    writeMPU(0x15, 0); writeMPU(0x16, 0);
+    writeMPU(0x17, 0); writeMPU(0x18, 0);
     delay(200);
     for (int i = 0; i < 2000; i++) { readIMU(); delay(3); }
     angle_pitch = 0; angle_roll = 0;
     gyro_angles_set = false;
     Serial.println(F("MPU OK"));
-  } else {
-    Serial.println(F("MPU FAIL"));
+  }
+  if (!mpuOK) {
+    Serial.println(F("MPU FAIL — halting. Check wiring/addr."));
+    while (1) { updateLED(2); delay(80); }
   }
 
   Serial.println(F("Waiting for RC..."));
   uint32_t waitStart = millis();
   while (millis() - waitStart < 10000) {
     noInterrupts();
-    for (uint8_t i = 0; i < NUM_CH; i++) rcCopy[i] = rcPulse[i];
+    uint32_t ts3 = rcFallTime[2];
     interrupts();
-    if (rcCopy[2] > 800 && rcCopy[2] < 2200) break;
+    if (millis() - ts3 < 500) break;
     delay(100);
   }
 
@@ -243,13 +249,13 @@ void loop() {
   gyro_pitch_input = (gyro_pitch_input * 0.7) + ((gyro_pitch / GYRO_LSB_PER_DPS) * 0.3);
   gyro_yaw_input   = (gyro_yaw_input   * 0.7) + ((gyro_yaw   / GYRO_LSB_PER_DPS) * 0.3);
 
-  // ── Angle integration from gyro (65.5 LSB/°/s, dt=0.004s => 0.0000611) ──
-  angle_pitch += gyro_pitch * 0.0000611;
-  angle_roll  += gyro_roll  * 0.0000611;
+  // ── Angle integration from gyro ──
+  angle_pitch += gyro_pitch * GYRO_ANGLE_DT;
+  angle_roll  += gyro_roll  * GYRO_ANGLE_DT;
 
   // ── Cross-axis correction for yaw ──
-  angle_pitch -= angle_roll * sin(gyro_yaw * 0.000001066);
-  angle_roll  += angle_pitch * sin(gyro_yaw * 0.000001066);
+  angle_pitch -= angle_roll * sin(gyro_yaw * GYRO_YAW_RAD);
+  angle_roll  += angle_pitch * sin(gyro_yaw * GYRO_YAW_RAD);
 
   // ── Accelerometer angle (atan2 — matches our proven calibration) ──
   float ax_g = (float)acc_x / ACCEL_LSB_PER_G;
@@ -268,16 +274,22 @@ void loop() {
   roll_level_adjust  = angle_roll  * 15;
   if (!auto_level) { pitch_level_adjust = 0; roll_level_adjust = 0; }
 
-  // ── Copy RC ──
+  // ── Copy RC + freshness check ──
+  uint32_t now = millis();
   noInterrupts();
   for (uint8_t i = 0; i < NUM_CH; i++) rcCopy[i] = rcPulse[i];
-  bool signalUpdated = rcUpdated;
-  rcUpdated = false;
   interrupts();
 
-  // ── Signal check ──
-  if (rcCopy[2] > 800 && rcCopy[2] < 2200) rcLastSeen = millis();
-  if (millis() - rcLastSeen > 1000) {
+  bool signalFresh = false;
+  for (uint8_t i = 0; i < 4; i++) {
+    uint32_t ts;
+    noInterrupts();
+    ts = rcFallTime[i];
+    interrupts();
+    if (now - ts < 500) { signalFresh = true; break; }
+  }
+
+  if (!signalFresh) {
     start = 0;
     esc_1 = 1000; esc_2 = 1000; esc_3 = 1000; esc_4 = 1000;
     esc1.writeMicroseconds(esc_1); esc2.writeMicroseconds(esc_2);

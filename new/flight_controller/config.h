@@ -62,5 +62,8 @@ struct RCCh { uint16_t min, mid, max; };
 #define ACCEL_FS_SEL 0x08   // ±4g
 #define GYRO_LSB_PER_DPS  65.5f
 #define ACCEL_LSB_PER_G   8192.0f
+#define LOOP_PERIOD_S     0.004f    // 250Hz
+#define GYRO_ANGLE_DT     (LOOP_PERIOD_S / GYRO_LSB_PER_DPS)   // ≈0.0000611
+#define GYRO_YAW_RAD      (GYRO_ANGLE_DT * 0.01745329f)        // ≈0.000001066
 
 #endif
