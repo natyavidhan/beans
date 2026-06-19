@@ -84,8 +84,7 @@ void setup() {
   PCMSK2 = 0xFC;
 
   Serial.println(F("=== FS-R6B Receiver Reader ==="));
-  Serial.println(F("CH1(Roll) CH2(Pitch) CH3(Thr) CH4(Yaw) CH5(AUX1) CH6(AUX2)"));
-  Serial.println(F("Send 'r' to reset min/max"));
+  Serial.println(F("Roll Pitch Thr Yaw AUX1 AUX2  ('r'=reset)"));
   Serial.println();
 }
 
@@ -112,32 +111,20 @@ void loop() {
         chMin[i] = 65535;
         chMax[i] = 0;
       }
-      Serial.println(F(">>> Min/Max reset <<<"));
+      Serial.println(F("-- min/max reset --"));
     }
   }
 
   if (now - lastPrint >= 200) {
-    lastPrint = now;
+  lastPrint = now;
 
-    Serial.println(F("--- Channel Values (us) ---"));
-    for (uint8_t i = 0; i < NUM_CH; i++) {
-      Serial.print(F("  CH"));
-      Serial.print(i + 1);
-      Serial.print(' ');
-      Serial.print(chName[i]);
-      Serial.print(F(": "));
-      if (now - lastUpdate[i] <= RC_TIMEOUT_MS) {
-        Serial.print(ch[i]);
-        Serial.print(F("  [min:"));
-        Serial.print(chMin[i]);
-        Serial.print(F(" max:"));
-        Serial.print(chMax[i]);
-        Serial.print(']');
-      } else {
-        Serial.print(F("--- NO SIGNAL ---"));
-      }
-      Serial.println();
-    }
-    Serial.println();
+  for (uint8_t i = 0; i < NUM_CH; i++) {
+    if (now - lastUpdate[i] <= RC_TIMEOUT_MS)
+      Serial.print(ch[i]);
+    else
+      Serial.print(F("---"));
+    if (i < NUM_CH - 1) Serial.print(' ');
   }
+  Serial.println();
+}
 }

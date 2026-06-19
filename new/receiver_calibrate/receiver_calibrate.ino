@@ -137,6 +137,7 @@ void setup() {
   waitForSerial("STEP 2: Move ALL sticks and switches to their full extremes.\n  Move roll L/R, pitch F/B, throttle min/max, yaw L/R,\n  flick all switches. Take 10 seconds, then return to center.\n  Press Enter when ready to START recording.");
 
   Serial.println(F("  Recording... move everything!"));
+  Serial.println(F("  CH1  CH2  CH3  CH4  CH5  CH6"));
   t0 = millis();
   while (millis() - t0 < 10000) {
     snapChannels(snap);
@@ -144,9 +145,13 @@ void setup() {
       for (uint8_t i = 0; i < NUM_CH; i++) {
         if (snap[i] < chMin[i]) chMin[i] = snap[i];
         if (snap[i] > chMax[i]) chMax[i] = snap[i];
+        Serial.print(snap[i]); Serial.print(' ');
       }
+      Serial.println();
+      delay(90);
+    } else {
+      delay(5);
     }
-    delay(5);
   }
 
   // ── Step 3: Return to center ──────────────────────
@@ -154,47 +159,26 @@ void setup() {
 
   // ── Final report ────────────────────────────────
   Serial.println();
-  Serial.println(F("╔══════════════════════════════════════════════════╗"));
-  Serial.println(F("║          RC CALIBRATION RESULTS                 ║"));
-  Serial.println(F("╠══════════════════════════════════════════════════╣"));
-  Serial.println(F("║ Channel       │ Min   │ Mid   │ Max   │ Range  ║"));
-  Serial.println(F("╠───────────────┼───────┼───────┼───────┼────────╣"));
-
+  Serial.println(F("=== RESULTS (min mid max range) ==="));
   for (uint8_t i = 0; i < NUM_CH; i++) {
-    Serial.print(F("║ "));
     Serial.print(chName[i]);
-    Serial.print(F(" │ "));
-    if (chMin[i] == 65535) Serial.print(F("  ---")); else { Serial.print(chMin[i]); if (chMin[i] < 1000) Serial.print(' '); }
-    Serial.print(F(" │ "));
-    Serial.print(chMid[i]);
-    Serial.print(F(" │ "));
-    Serial.print(chMax[i]);
-    Serial.print(F(" │ "));
-    Serial.print(chMax[i] - chMin[i]);
-    Serial.println(F("  ║"));
+    Serial.print(' '); Serial.print(chMin[i]);
+    Serial.print(' '); Serial.print(chMid[i]);
+    Serial.print(' '); Serial.print(chMax[i]);
+    Serial.print(' '); Serial.println(chMax[i] - chMin[i]);
   }
-
-  Serial.println(F("╚══════════════════════════════════════════════════╝"));
   Serial.println();
-  Serial.println(F("Copy-paste ready array:"));
-  Serial.println();
-
-  Serial.print(F("RCChannel RC[6] = {\n"));
+  Serial.println(F("=== CONFIG.H ==="));
   for (uint8_t i = 0; i < NUM_CH; i++) {
-    Serial.print(F("  {"));
-    Serial.print(chMin[i]);
-    Serial.print(F(", "));
-    Serial.print(chMid[i]);
-    Serial.print(F(", "));
-    Serial.print(chMax[i]);
-    if (i < NUM_CH - 1) Serial.println(F("},"));
-    else Serial.println(F("}"));
+    Serial.print(F("#define RC_CH")); Serial.print(i + 1);
+    Serial.print(F("_MIN  ")); Serial.print(chMin[i]);
+    Serial.print(F("\n#define RC_CH")); Serial.print(i + 1);
+    Serial.print(F("_MID  ")); Serial.print(chMid[i]);
+    Serial.print(F("\n#define RC_CH")); Serial.print(i + 1);
+    Serial.print(F("_MAX  ")); Serial.println(chMax[i]);
   }
-  Serial.println(F("};"));
-
   Serial.println();
-  Serial.println(F("Calibration complete. You can close serial monitor."));
-  Serial.println(F("Paste the above array into your flight controller code."));
+  Serial.println(F("Done."));
 
   while (1);
 }
