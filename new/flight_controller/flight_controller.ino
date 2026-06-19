@@ -209,7 +209,6 @@ void setup() {
     writeMPU(0x15, 0); writeMPU(0x16, 0);
     writeMPU(0x17, 0); writeMPU(0x18, 0);
     delay(200);
-    for (int i = 0; i < 2000; i++) { readIMU(); delay(3); }
     angle_pitch = 0; angle_roll = 0;
     gyro_angles_set = false;
     Serial.println(F("MPU OK"));
@@ -225,12 +224,13 @@ void setup() {
     noInterrupts();
     uint32_t ts3 = rcFallTime[2];
     interrupts();
-    if (millis() - ts3 < 500) break;
+    if (micros() - ts3 < 500000UL) break;
     delay(100);
   }
 
   Serial.println(F("Arm: Throttle LOW + Yaw LEFT (hold 2s)"));
   Serial.println(F("Disarm: Throttle LOW + Yaw RIGHT (hold 2s)"));
+  Serial.println(F("S Rroll,Rpitch,Rthr,Ryaw Aroll,Apitch Groll,Gpitch,Gyaw Proll,Ppitch,Pyaw Iyaw Em1,m2,m3,m4"));
   Serial.println();
   loop_timer = micros();
 }
@@ -265,9 +265,9 @@ void loop() {
   angle_roll_acc  = atan2(ay_g, az_g) * 57.296 - LEVEL_ROLL;
   angle_pitch_acc = atan2(-ax_g, sqrt(ay_g * ay_g + az_g * az_g)) * 57.296 - LEVEL_PITCH;
 
-  // ── Complementary filter (0.96 gyro / 0.04 accel — fast enough to correct) ──
-  angle_pitch = angle_pitch * 0.96 + angle_pitch_acc * 0.04;
-  angle_roll  = angle_roll  * 0.96 + angle_roll_acc  * 0.04;
+  // ── Complementary filter (0.9996 gyro / 0.0004 accel — rejects motor vibration) ──
+  angle_pitch = angle_pitch * 0.9996 + angle_pitch_acc * 0.0004;
+  angle_roll  = angle_roll  * 0.9996 + angle_roll_acc  * 0.0004;
 
   // ── Level adjust for auto-level (angle * 15 => max 15° correction) ──
   pitch_level_adjust = angle_pitch * 15;
@@ -275,7 +275,7 @@ void loop() {
   if (!auto_level) { pitch_level_adjust = 0; roll_level_adjust = 0; }
 
   // ── Copy RC + freshness check ──
-  uint32_t now = millis();
+  uint32_t now = micros();
   noInterrupts();
   for (uint8_t i = 0; i < NUM_CH; i++) rcCopy[i] = rcPulse[i];
   interrupts();
@@ -286,7 +286,7 @@ void loop() {
     noInterrupts();
     ts = rcFallTime[i];
     interrupts();
-    if (now - ts < 500) { signalFresh = true; break; }
+    if (now - ts < 500000UL) { signalFresh = true; break; }
   }
 
   if (!signalFresh) {
@@ -305,7 +305,8 @@ void loop() {
   int rc_yaw   = convertRC(3);
 
   // ── Kill switch (CH5 low) ──
-  if (rcCopy[4] < 1200 && start == 2) {
+  int rc_aux1 = convertRC(4);
+  if (rc_aux1 < 1200 && start == 2) {
     start = 0;
     Serial.println(F("=== KILL SWITCH ==="));
   }
@@ -350,16 +351,16 @@ void loop() {
 
   calculate_pid();
 
-  // ── Motor mixing (YMFC style) ──
+  // ── Motor mixing (FL/FR/RL/RR layout) ──
   // M1=Front-Left CCW, M2=Front-Right CW, M3=Rear-Left CW, M4=Rear-Right CCW
   throttle = rc_throttle;
 
   if (start == 2) {
     if (throttle > 1800) throttle = 1800;
-    esc_1 = throttle - pid_output_pitch + pid_output_roll - pid_output_yaw;
-    esc_2 = throttle + pid_output_pitch + pid_output_roll + pid_output_yaw;
-    esc_3 = throttle + pid_output_pitch - pid_output_roll - pid_output_yaw;
-    esc_4 = throttle - pid_output_pitch - pid_output_roll + pid_output_yaw;
+    esc_1 = throttle - pid_output_pitch + pid_output_roll + pid_output_yaw;  // FL
+    esc_2 = throttle - pid_output_pitch - pid_output_roll - pid_output_yaw;  // FR
+    esc_3 = throttle + pid_output_pitch + pid_output_roll - pid_output_yaw;  // RL
+    esc_4 = throttle + pid_output_pitch - pid_output_roll + pid_output_yaw;  // RR
 
     if (esc_1 < 1100) esc_1 = 1100;
     if (esc_2 < 1100) esc_2 = 1100;
@@ -384,24 +385,18 @@ void loop() {
   static uint32_t lastPrint = 0;
   if (millis() - lastPrint > 200) {
     lastPrint = millis();
-    Serial.print(F("ST:")); Serial.print(start);
-    Serial.print(F(" RC:")); Serial.print(rcCopy[0]); Serial.print(',');
-    Serial.print(rcCopy[1]); Serial.print(','); Serial.print(rcCopy[2]); Serial.print(',');
-    Serial.print(rcCopy[3]); Serial.print(','); Serial.print(rcCopy[4]); Serial.print(',');
-    Serial.print(rcCopy[5]);
-    Serial.print(F("|IMU:")); Serial.print(angle_roll, 1); Serial.print(',');
-    Serial.print(angle_pitch, 1); Serial.print(',');
-    Serial.print(gyro_yaw_input, 1); Serial.print(',');
-    Serial.print(gyro_roll_input, 1); Serial.print(',');
-    Serial.print(gyro_pitch_input, 1); Serial.print(',');
-    Serial.print(gyro_yaw_input, 1);
-    Serial.print(F("|PID:")); Serial.print(pid_roll_setpoint, 1); Serial.print(',');
-    Serial.print(pid_pitch_setpoint, 1); Serial.print(',');
-    Serial.print(pid_yaw_setpoint, 1); Serial.print(',');
-    Serial.print(pid_output_roll, 0); Serial.print(',');
-    Serial.print(pid_output_pitch, 0); Serial.print(',');
-    Serial.print(pid_output_yaw, 0);
-    Serial.print(F("|ESC:")); Serial.print(esc_1); Serial.print(',');
+    Serial.print(start);
+    Serial.print(F(" R")); Serial.print(rc_roll); Serial.print(',');
+    Serial.print(rc_pitch); Serial.print(','); Serial.print(rc_throttle); Serial.print(',');
+    Serial.print(rc_yaw);
+    Serial.print(F(" A")); Serial.print(angle_roll, 1); Serial.print(',');
+    Serial.print(angle_pitch, 1);
+    Serial.print(F(" G")); Serial.print(gyro_roll_input, 1); Serial.print(',');
+    Serial.print(gyro_pitch_input, 1); Serial.print(','); Serial.print(gyro_yaw_input, 1);
+    Serial.print(F(" P")); Serial.print(pid_output_roll, 0); Serial.print(',');
+    Serial.print(pid_output_pitch, 0); Serial.print(','); Serial.print(pid_output_yaw, 0);
+    Serial.print(F(" I")); Serial.print(pid_i_mem_yaw, 1);
+    Serial.print(F(" E")); Serial.print(esc_1); Serial.print(',');
     Serial.print(esc_2); Serial.print(','); Serial.print(esc_3); Serial.print(',');
     Serial.print(esc_4);
     Serial.println();
