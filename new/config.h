@@ -49,13 +49,13 @@ struct RCCh { uint16_t min, mid, max; };
 #define MPU_ADDR 0x68
 
 // Gyro bias (raw LSB at ±500°/s)
-#define GYRO_BIAS_X  135
-#define GYRO_BIAS_Y  33
-#define GYRO_BIAS_Z  -27
+#define GYRO_BIAS_X  142
+#define GYRO_BIAS_Y  22
+#define GYRO_BIAS_Z  -37
 
 // Accel level offsets (degrees)
-#define LEVEL_ROLL   0.7913
-#define LEVEL_PITCH -6.8
+#define LEVEL_ROLL   -0.1848
+#define LEVEL_PITCH  2.9959
 
 // ── IMU Config ──
 #define GYRO_FS_SEL  0x08   // ±500°/s
